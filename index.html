@@ -688,12 +688,12 @@ case'zombie':this.w=20;this.h=32;this.mhp=Math.ceil((25+lvl*10)*scaleFactor);thi
 case'bat':this.w=18;this.h=14;this.mhp=Math.ceil((12+lvl*6)*scaleFactor);this.spd=Math.min(1.8+lvl*.2,4)*Math.pow(1.05,cycle);this.dmg=Math.ceil((5+lvl*2)*scaleFactor);this.exp=Math.ceil(3*scaleFactor);this.flying=true;this.diveTimer=0;this.isDiving=false;break;
 case'skeleton':this.w=20;this.h=36;this.mhp=Math.ceil((35+lvl*12)*scaleFactor);this.spd=Math.min(.8+lvl*.1,2.5)*Math.pow(1.05,cycle);this.dmg=Math.ceil((12+lvl*4)*scaleFactor);this.exp=Math.ceil(10*scaleFactor);this.archer=true;this.shootCd=0;break;
 case'elite':this.w=28;this.h=40;this.mhp=Math.ceil((90+lvl*30)*scaleFactor);this.spd=Math.min(1.3+lvl*.1,3.5)*Math.pow(1.08,cycle);this.dmg=Math.ceil((20+lvl*6)*scaleFactor);this.exp=Math.ceil(30*scaleFactor);break;
-case'caster':this.w=22;this.h=34;this.mhp=Math.ceil((30+lvl*9)*scaleFactor);this.spd=Math.min(1.0+lvl*.08,2.4)*Math.pow(1.05,cycle);this.dmg=Math.ceil((10+lvl*3)*scaleFactor);this.exp=Math.ceil(16*scaleFactor);this.caster=true;this.castCd=U.ri(50,110);this.castPhase='idle';this.chargeT=0;this.teleCd=U.ri(150,260);this.hover=Math.random()*Math.PI*2;break;
+case'caster':this.w=22;this.h=34;this.mhp=Math.ceil((30+lvl*9)*scaleFactor);this.spd=Math.min(1.0+lvl*.08,2.4)*Math.pow(1.05,cycle);this.dmg=Math.ceil((10+lvl*3)*scaleFactor);this.exp=Math.ceil(16*scaleFactor);this.caster=true;this.castCd=U.ri(50,110);this.castPhase='idle';this.chargeT=0;this.teleCd=U.ri(320,480);this.hover=Math.random()*Math.PI*2;break;
 case'shield':this.w=26;this.h=40;this.mhp=Math.ceil((75+lvl*24)*scaleFactor);this.spd=Math.min(.7+lvl*.06,1.8)*Math.pow(1.04,cycle);this.dmg=Math.ceil((16+lvl*5)*scaleFactor);this.exp=Math.ceil(24*scaleFactor);this.shielder=true;this.bashCd=U.ri(90,160);this.bashPhase='idle';this.windupTimer=0;this.bashTimer=0;break;
 case'boss':this.w=44;this.h=56;this.mhp=Math.ceil((520+lvl*140)*scaleFactor);this.spd=Math.min(1.15+lvl*.05,2.2)*Math.pow(1.05,cycle);this.dmg=Math.ceil((24+lvl*7)*scaleFactor);this.exp=Math.ceil(120*scaleFactor);this.boss=true;this.bossPhase='idle';this.atkCd=90;this.leapCd=220;this.enraged=false;this.slams=0;this.slamT=0;this.chargeT=0;break;
 case'wisp':this.w=14;this.h=14;this.mhp=Math.ceil((10+lvl*4)*scaleFactor);this.spd=Math.min(2.0+lvl*.15,3.6)*Math.pow(1.05,cycle);this.dmg=Math.ceil((14+lvl*4)*scaleFactor);this.exp=Math.ceil(6*scaleFactor);this.flying=true;this.wisp=true;this.fusing=false;this.fuseT=0;break;
 case'spitter':this.w=22;this.h=30;this.mhp=Math.ceil((28+lvl*10)*scaleFactor);this.spd=Math.min(.9+lvl*.08,2.2)*Math.pow(1.05,cycle);this.dmg=Math.ceil((9+lvl*3)*scaleFactor);this.exp=Math.ceil(12*scaleFactor);this.spitter=true;this.shootCd=U.ri(40,90);break;
-case'reaper':this.w=26;this.h=42;this.mhp=Math.ceil((240+lvl*70)*scaleFactor);this.spd=Math.min(1.4+lvl*.08,2.8)*Math.pow(1.06,cycle);this.dmg=Math.ceil((18+lvl*5)*scaleFactor);this.exp=Math.ceil(70*scaleFactor);this.reaper=true;this.miniboss=true;this.rPhase='idle';this.rCd=80;this.teleCd=140;break;
+case'reaper':this.w=26;this.h=42;this.mhp=Math.ceil((240+lvl*70)*scaleFactor);this.spd=Math.min(1.4+lvl*.08,2.8)*Math.pow(1.06,cycle);this.dmg=Math.ceil((18+lvl*5)*scaleFactor);this.exp=Math.ceil(70*scaleFactor);this.reaper=true;this.miniboss=true;this.rPhase='idle';this.rCd=80;this.teleCd=300;break;
 }
 // variant quirks: tanky brutes, frail sprinters, twitchy lungers, elemental archers
 switch(this.variant){
@@ -775,7 +775,7 @@ updateCaster(world,player,game,see,dx,dy,dist,pcx,pcy,ecx,ecy,s){
 if(this.castCd>0)this.castCd-=s;if(this.teleCd>0)this.teleCd-=s;
 const hb=Math.sin(Date.now()/500+this.hover)*0.5;
 if(see){this.ai.saw=true;this.facing=Math.sign(dx)||this.facing;
-if((dist<95||this.teleCd<=0)&&this.castPhase!=='charge'){this.teleport(world,player,game);this.teleCd=U.ri(200,320);}
+if((dist<70||this.teleCd<=0)&&this.castPhase!=='charge'){this.teleport(world,player,game);this.teleCd=U.ri(420,620);}
 const desired=195,away=dist<desired?-1:1,ang=Math.atan2(dy,dx);
 this.vx=U.lerp(this.vx,Math.cos(ang)*this.spd*away,.05);
 this.vy=U.lerp(this.vy,Math.sin(ang)*this.spd*0.45*away+hb*0.4,.05);
@@ -795,9 +795,9 @@ SFX.portal();game.particles.emit(this.x+this.w/2,this.y+this.h/2,18,{color:'#e0a
 }
 fireOrb(game,pcx,pcy,ecx,ecy){const ang=Math.atan2(pcy-ecy,pcx-ecx),sp=2.3;game.orbs.push(new Orb(ecx,ecy,Math.cos(ang)*sp,Math.sin(ang)*sp,this.dmg,'enemy'));SFX.playTone(520,0.16,'sine',0.14);SFX.playTone(720,0.12,'triangle',0.1);game.particles.emit(ecx,ecy,8,{color:'#c060ff',size:3,life:16,glow:true,vxMin:-2,vxMax:2,vyMin:-2,vyMax:2});}
 updateShield(world,player,game,see,dx,dy,dist,s){
-if(this.bashCd>0)this.bashCd-=s;
+if(this.bashCd>0)this.bashCd-=s;if(this.turnCd===undefined)this.turnCd=0;
 switch(this.bashPhase){
-case'idle':if(see){this.facing=Math.sign(dx)||1;if(dy<-42&&this.gr&&U.ch(.02*s)){this.vy=-10;this.gr=false;}if(dist>48)this.vx=U.lerp(this.vx,Math.sign(dx)*this.spd,.07);else this.vx*=Math.pow(0.8,s);if(dist<95&&this.bashCd<=0){this.bashPhase='windup';this.windupTimer=24;this.isWindingUp=true;}}else{if(this.ai.timer<=0){this.ai.dir*=-1;this.ai.timer=U.ri(60,180);}this.vx=this.ai.dir*this.spd*.4;this.facing=this.ai.dir;}break;
+case'idle':if(see){const want=Math.sign(dx)||this.facing;if(want===this.facing)this.turnCd=45;else{this.turnCd-=s;if(this.turnCd<=0){this.facing=want;this.turnCd=45;}}if(dy<-42&&this.gr&&U.ch(.02*s)){this.vy=-10;this.gr=false;}if(dist>48)this.vx=U.lerp(this.vx,Math.sign(dx)*this.spd,.07);else this.vx*=Math.pow(0.8,s);if(dist<95&&this.bashCd<=0){this.bashPhase='windup';this.windupTimer=24;this.isWindingUp=true;}}else{if(this.ai.timer<=0){this.ai.dir*=-1;this.ai.timer=U.ri(60,180);}this.vx=this.ai.dir*this.spd*.4;this.facing=this.ai.dir;}break;
 case'windup':this.windupTimer-=s;this.vx*=Math.pow(0.8,s);this.isWindingUp=true;if(this.windupTimer<=0){this.bashPhase='bash';this.bashTimer=15;this.isWindingUp=false;this.vx=this.facing*this.spd*4.5;game.particles.emit(this.facing===1?this.x+this.w:this.x,this.y+this.h/2,8,{color:'#88a',size:3,life:12,vxMin:this.facing*1,vxMax:this.facing*4,vyMin:-2,vyMax:2});}break;
 case'bash':this.bashTimer-=s;this.vx=this.facing*this.spd*4;const r=42,ab={x:this.facing===1?this.x+this.w:this.x-r,y:this.y,w:r,h:this.h};if(U.rc(ab,{x:player.x,y:player.y,w:player.w,h:player.h})){if(player.inv<=0&&!player.rl){game.playerTakeDmg(this.dmg,Math.sign(player.x-this.x));game.shake.trigger(6,8);}this.bashTimer=0;}if(this.bashTimer<=0){this.bashPhase='idle';this.bashCd=U.ri(110,180);}break;
 }
@@ -851,7 +851,7 @@ if(this.rCd>0)this.rCd-=s;if(this.teleCd>0)this.teleCd-=s;
 switch(this.rPhase){
 case'idle':
 if(see){this.ai.saw=true;this.facing=Math.sign(dx)||1;
-if(dist<70&&this.teleCd<=0){this.teleport(world,player,game);this.teleCd=160;}
+if(dist<55&&this.teleCd<=0){this.teleport(world,player,game);this.teleCd=340;}
 else if(this.rCd<=0){if(dist<130){this.rPhase='scytheWind';this.windupTimer=16;this.isWindingUp=true;}else if(dist<340){this.rPhase='castWind';this.windupTimer=22;this.isWindingUp=true;}}
 else this.vx=U.lerp(this.vx,Math.sign(dx)*this.spd*.8,.06);
 }else this.vx*=Math.pow(.9,s);break;
