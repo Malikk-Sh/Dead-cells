@@ -1365,10 +1365,19 @@ if(p.hangCd>0)p.hangCd-=s;if(p.climbCd>0)p.climbCd-=s;if(p.wjSpin>0)p.wjSpin-=s;
 if(p.slowT>0){p.slowT-=s;if(this.fr%8===0)this.particles.emit(p.x+p.w/2,p.y+U.rand(0,p.h),1,{color:'#9fdcff',size:2,life:16,glow:true,gravity:0.06,vxMin:-0.5,vxMax:0.5,vyMin:0,vyMax:0.5});}
 // ---- LEDGE HANG ----
 if(p.hang){
-p.vx=0;p.vy=0;p.wjLeft=p.wjMax;p.dj=p.hdj;
+p.vx=0;p.vy=0;p.wjLeft=p.wjMax;p.dj=p.hdj;p.jbt=0;
 const hmx=inp.getMoveX();
-if(inp.isJump()&&p.jbt>0){p.jbt=0;p.hang=false;p.hangCd=12;p.vy=-10.5;p.sqy=1.25;p.sqx=0.8;SFX.dodge();this.particles.emit(p.x+p.w/2,p.y+8,8,{color:'#cbb89a',size:2.5,life:14,gravity:0.08,friction:0.9,vxMin:-2,vxMax:2,vyMin:-2,vyMax:0});}
-else if(inp.isDown()||(hmx!==0&&hmx!==p.facing)){p.hang=false;p.hangCd=14;}
+const jHeld=inp.isJump();
+if(jHeld&&!p.jmp){
+// climb-up hop onto the ledge (fresh jump press)
+p.jmp=true;p.hang=false;p.hangCd=12;p.cyt=0;
+p.vy=-12.5;p.vx=p.facing*4;p.sqy=1.3;p.sqx=0.78;p.dj=p.hdj;p.wjLeft=p.wjMax;
+SFX.dodge();
+this.particles.emit(p.x+p.w/2,p.y+8,9,{color:'#cbb89a',size:2.5,life:14,gravity:0.08,friction:0.9,vxMin:-2,vxMax:2,vyMin:-2.5,vyMax:0});
+this.applyPP(s);return;
+}
+if(!jHeld)p.jmp=false;
+if(inp.isDown()||(hmx!==0&&hmx!==p.facing)){p.hang=false;p.hangCd=14;p.jmp=jHeld;}
 return;}
 // ---- LADDER CLIMB ----
 const _lad=(()=>{const ts2=32,lcx=Math.floor((p.x+p.w/2)/ts2),t2=this.world.tiles;const a=Math.floor((p.y+6)/ts2),b2=Math.floor((p.y+p.h-6)/ts2);return(t2[a]&&t2[a][lcx]===6)||(t2[b2]&&t2[b2][lcx]===6);})();
