@@ -1584,6 +1584,41 @@ if(this.streakT>0){this.streakT-=dt;if(this.streakT<=0)this.streak=0;}if(this.st
 
 updateShockwaves(dt){const p=this.player;this.shockwaves=this.shockwaves.filter(sw=>{const ok=sw.update(this.world,dt);if(this.fr%2===0)this.particles.emit(sw.x,sw.y-4,1,{color:'#ff9a30',size:2.5,life:10,glow:true,gravity:-0.05,vxMin:-1,vxMax:1,vyMin:-1.5,vyMax:0});if(!ok)return false;if(U.rc({x:sw.x-7,y:sw.y-20,w:14,h:20},{x:p.x,y:p.y,w:p.w,h:p.h})){if(p.inv<=0&&!p.rl){this.playerTakeDmg(sw.dmg,sw.dir);return false;}}return true;});}
 
+drawArches(c,cam,vw,vh){const w=this.world,ts=w.ts;
+const ac={dungeon:['#242444','#2e2e52','#16162c','#3a3a60'],sewers:['#1c3626','#264a32','#0e1e14','#356a44'],ramparts:['#352414','#463322','#1e120a','#5c4630'],castle:['#1a3242','#244458','#0e1e2a','#356a80'],crypt:['#281c46','#342656','#140e28','#4a3676']}[w.theme]||['#242444','#2e2e52','#16162c','#3a3a60'];
+const sx0=Math.max(0,Math.floor(cam.x/ts)-4),ex=Math.min(w.tw-1,Math.floor((cam.x+vw)/ts)+4),sy0=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
+for(let ty=sy0;ty<=ey;ty++){const row=w.tiles[ty];if(!row)continue;let tx=sx0;
+while(tx<=ex){if(row[tx]===2){let x1=tx;while(x1+1<w.tw&&w.tiles[ty][x1+1]===2)x1++;const runLen=x1-tx+1;
+// open space directly below the walkway (a bridge over a chasm)?
+const below=w.tiles[ty+2];const openBelow=!(below&&(below[tx]===1||below[tx]===2))&&!(below&&(below[x1]===1||below[x1]===2));
+if(runLen>=3&&openBelow){this._arch(c,tx,x1,ty,cam,ac);}
+tx=x1+1;}else tx++;}}
+}
+_arch(c,x0,x1,ty,cam,ac){const ts=this.world.ts,w=this.world;
+const xL=x0*ts-cam.x,xR=(x1+1)*ts-cam.x,yTop=ty*ts-cam.y+7;
+// find how far down the piers go (until solid ground, capped)
+let depth=0;for(let d=1;d<=11;d++){const r=w.tiles[ty+d];if(r&&(r[x0]===1||r[x1]===1)){depth=d;break;}depth=d;}
+const yBot=yTop+depth*ts;const pw=Math.max(9,(x1-x0)*ts*0.13);const span=xR-xL;
+const rise=Math.min(span*0.32,110),spring=yTop+14;
+c.save();
+// stone body with an arched opening carved beneath the walkway
+c.fillStyle=ac[0];
+c.beginPath();c.moveTo(xL,yTop);c.lineTo(xL,yBot);c.lineTo(xL+pw,yBot);c.lineTo(xL+pw,spring);
+c.quadraticCurveTo((xL+xR)/2,spring-rise,xR-pw,spring);c.lineTo(xR-pw,yBot);c.lineTo(xR,yBot);c.lineTo(xR,yTop);c.closePath();c.fill();
+// pier shading
+c.fillStyle=ac[1];c.fillRect(xL,yTop,3,yBot-yTop);c.fillRect(xR-3,yTop,3,yBot-yTop);
+c.fillStyle=ac[2];c.fillRect(xL+pw-3,spring-6,3,yBot-spring+6);c.fillRect(xR-pw,spring-6,3,yBot-spring+6);
+// brick courses on piers
+c.fillStyle=ac[2];for(let yy=yTop+12;yy<yBot;yy+=14){c.fillRect(xL,yy,pw,1.5);c.fillRect(xR-pw,yy,pw,1.5);}
+// top-lit edge on the walkway mass and pier tops
+c.fillStyle=ac[3];c.fillRect(xL,yTop,pw,2.5);c.fillRect(xR-pw,yTop,pw,2.5);
+// voussoirs (arch ring) + keystone
+c.strokeStyle=ac[3];c.lineWidth=4.5;c.beginPath();c.moveTo(xL+pw,spring);c.quadraticCurveTo((xL+xR)/2,spring-rise,xR-pw,spring);c.stroke();
+c.strokeStyle=ac[2];c.lineWidth=1.4;const segs=Math.max(5,Math.round(span/22));for(let i=0;i<=segs;i++){const tt2=i/segs,mx=xL+pw+(xR-pw-(xL+pw))*tt2,my=spring-Math.sin(tt2*Math.PI)*rise;c.beginPath();c.moveTo(mx,my-2);c.lineTo(mx,my+5);c.stroke();}
+// keystone
+c.fillStyle=ac[1];c.fillRect((xL+xR)/2-5,spring-rise-4,10,12);c.fillStyle=ac[3];c.fillRect((xL+xR)/2-5,spring-rise-4,10,2);
+c.restore();
+}
 drawVegetation(c,cam,vw,vh){const w=this.world,ts=w.ts,t=Date.now();
 const veg={dungeon:['#2e5a34','#3a7a42','#5aa85a'],sewers:['#2e6a2e','#3a8a3a','#6fd06f'],ramparts:['#4a5a24','#6a7a2e','#9aba44'],castle:['#2a5a44','#367a5a','#4fb090'],crypt:['#3a2a6a','#4e3a8a','#8060d0']}[w.theme]||['#2e5a34','#3a7a42','#5aa85a'];
 const sx0=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(w.tw-1,Math.floor((cam.x+vw)/ts)+1),sy0=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
@@ -1596,11 +1631,11 @@ if(topOpen&&hsh<11){const cnt=3+(hsh%3);for(let i=0;i<cnt;i++){const gx=px+3+((h
 if(hsh<4){const fx=px+ts*0.5+((tx*5)&7)-3;c.strokeStyle=veg[1];c.lineWidth=1.3;for(let f=-2;f<=2;f++){const a=-Math.PI/2+f*0.42,ln=7+((tx+f)&3);c.beginPath();c.moveTo(fx,py);c.quadraticCurveTo(fx+Math.cos(a)*ln*0.5,py+Math.sin(a)*ln*0.6,fx+Math.cos(a)*ln,py+Math.sin(a)*ln);c.stroke();}}
 // glowing blossom
 if(hsh===2){const bx2=px+8+((tx*3)&12),by2=py-6-((ty*2)&3);c.save();c.globalCompositeOperation='lighter';const bc=w.theme==='crypt'?'#e070ff':w.theme==='ramparts'?'#ffcf5a':w.theme==='castle'?'#7fffe0':'#a0ff90';c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=6;for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2+t/1400;c.beginPath();c.ellipse(bx2+Math.cos(pa)*2.4,by2+Math.sin(pa)*2.4,1.6,1,pa,0,Math.PI*2);c.fill();}c.fillStyle='#fff';c.beginPath();c.arc(bx2,by2,1.1,0,Math.PI*2);c.fill();c.restore();}}
-// dense hanging vines under exposed platform/ledge
-if(botOpen&&(tt===2||hsh<9)){const strands=tt===2?2:1;for(let sI=0;sI<strands;sI++){const vx=px+5+((hsh+sI*5)%3)*9+sI*3,len=10+((tx*13+ty*7+sI*29)&17),sway=Math.sin(t/700+tx*0.5+sI)*3.2;
-c.strokeStyle=veg[0];c.lineWidth=2;c.beginPath();c.moveTo(vx,py+ts-2);c.quadraticCurveTo(vx+sway*0.5,py+ts-2+len*0.6,vx+sway,py+ts-2+len);c.stroke();
-c.fillStyle=veg[1];for(let l=0;l<4;l++){const lt=(l+1)/5,lx=vx+sway*lt,ly=py+ts-2+len*lt;c.beginPath();c.ellipse(lx+(l%2?3.2:-3.2),ly,3.2,1.9,l%2?0.6:-0.6,0,Math.PI*2);c.fill();if(l%2){c.fillStyle=veg[2];c.beginPath();c.ellipse(lx-3,ly+2,2.2,1.3,-0.5,0,Math.PI*2);c.fill();c.fillStyle=veg[1];}}
-if(((tx+sI)&3)===0){c.save();c.globalCompositeOperation='lighter';const bc=w.theme==='crypt'?'#c060ff':'#9fff70';c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=5;c.beginPath();c.arc(vx+sway,py+ts-2+len,2,0,Math.PI*2);c.fill();c.restore();}}}
+// dense hanging vines — from the plank underside on platforms, tile bottom on ledges
+if(tt===2||(botOpen&&hsh<9)){const strands=tt===2?2:1,voy=(tt===2?py+7:py+ts-2);for(let sI=0;sI<strands;sI++){const vx=px+5+((hsh+sI*5)%3)*9+sI*3,len=10+((tx*13+ty*7+sI*29)&17),sway=Math.sin(t/700+tx*0.5+sI)*3.2;
+c.strokeStyle=veg[0];c.lineWidth=2;c.beginPath();c.moveTo(vx,voy);c.quadraticCurveTo(vx+sway*0.5,voy+len*0.6,vx+sway,voy+len);c.stroke();
+c.fillStyle=veg[1];for(let l=0;l<4;l++){const lt=(l+1)/5,lx=vx+sway*lt,ly=voy+len*lt;c.beginPath();c.ellipse(lx+(l%2?3.2:-3.2),ly,3.2,1.9,l%2?0.6:-0.6,0,Math.PI*2);c.fill();if(l%2){c.fillStyle=veg[2];c.beginPath();c.ellipse(lx-3,ly+2,2.2,1.3,-0.5,0,Math.PI*2);c.fill();c.fillStyle=veg[1];}}
+if(((tx+sI)&3)===0){c.save();c.globalCompositeOperation='lighter';const bc=w.theme==='crypt'?'#c060ff':'#9fff70';c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=5;c.beginPath();c.arc(vx+sway,voy+len,2,0,Math.PI*2);c.fill();c.restore();}}}
 }}
 drawPost(c){const W=canvas.width,H=canvas.height,pal=BG.pal;if(!pal)return;
 // cinematic color grade — wash shadows toward the biome's atmospheric hue
@@ -1660,7 +1695,7 @@ pollGamepad(){try{const gps=navigator.getGamepads?navigator.getGamepads():null;c
 draw(){const c=ctx;c.clearRect(0,0,canvas.width,canvas.height);if(this.state==='loading'||this.state==='menu')return;const cam = {
   x: Math.floor(this.cam.x + this.shake.x),
   y: Math.floor(this.cam.y + this.shake.y)
-};const zoom=this.zoom=U.clamp(canvas.height/330,1.35,2.05);const vw=this.vw=canvas.width/zoom,vh=this.vh=canvas.height/zoom;const lvls=getAllLevels(),ld=lvls[this.lvl%lvls.length];c.save();c.scale(zoom,zoom);BG.draw(c,cam,this.world,this.world.theme,this.fr,vw,vh);this.world.draw(c,cam,vw,vh);this.drawVegetation(c,cam,vw,vh);
+};const zoom=this.zoom=U.clamp(canvas.height/330,1.35,2.05);const vw=this.vw=canvas.width/zoom,vh=this.vh=canvas.height/zoom;const lvls=getAllLevels(),ld=lvls[this.lvl%lvls.length];c.save();c.scale(zoom,zoom);BG.draw(c,cam,this.world,this.world.theme,this.fr,vw,vh);this.drawArches(c,cam,vw,vh);this.world.draw(c,cam,vw,vh);this.drawVegetation(c,cam,vw,vh);
 const _now=Date.now();for(const d of this.decos){const sx=d.x-cam.x,sy=d.y-cam.y;if(sx<-70||sx>canvas.width+70)continue;if(d.type==='torch'){const flick=(Math.sin(_now/90+d.x)+Math.sin(_now/47+d.x*2))*0.5;const fl=flick*2;
 // soft light halo
 c.save();c.globalCompositeOperation='lighter';const gr=c.createRadialGradient(sx+16,sy-20,2,sx+16,sy-20,80+flick*10);gr.addColorStop(0,'rgba(255,150,50,0.34)');gr.addColorStop(.4,'rgba(255,110,30,0.14)');gr.addColorStop(1,'rgba(255,80,20,0)');c.fillStyle=gr;c.beginPath();c.arc(sx+16,sy-20,84,0,Math.PI*2);c.fill();c.restore();
