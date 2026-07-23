@@ -111,6 +111,20 @@ for(let x=48;x<52;x++)m[32][x]=3;
 for(let x=52;x<60;x++)m[32][x]=1;
 for(let x=0;x<60;x++)m[33][x]=1;
 for(let x=0;x<60;x++)m[34][x]=1;
+// ---- HARDER GAUNTLET: recessed spike trenches across the main floor ----
+const pit=(x0,x1)=>{for(let x=x0;x<x1;x++){m[31][x]=0;m[32][x]=3;}};
+pit(19,24);pit(35,40);
+// spiked shoulders flanking the trenches — a mistimed slide is punished
+m[32][18]=3;m[32][24]=3;m[32][34]=3;m[32][40]=3;
+// narrow icy stepping stones to cross each trench (slippery + tight)
+for(let x=20;x<22;x++)m[29][x]=2;
+for(let x=36;x<38;x++)m[29][x]=2;
+// a mid crossing of small icy platforms over the left approach
+for(let x=24;x<26;x++)m[24][x]=2;
+for(let x=30;x<32;x++)m[22][x]=2;
+// high archer perch above the center
+for(let x=27;x<33;x++)m[6][x]=1;
+for(let x=28;x<32;x++)m[5][x]=1;
 return{tiles:m,w:W,h:H,ts:T};
 },
 enemies:[
@@ -119,7 +133,15 @@ enemies:[
 {x:35,y:11,type:'bat'},
 {x:42,y:15,type:'zombie'},
 {x:25,y:7,type:'skeleton'},
-{x:15,y:4,type:'elite'}
+{x:15,y:4,type:'elite'},
+// harder: archers command the perch & pit approaches, a caster harasses, more bodies on the ice
+{x:29,y:4,type:'skeleton'},
+{x:31,y:4,type:'skeleton'},
+{x:24,y:23,type:'skeleton'},
+{x:38,y:30,type:'caster'},
+{x:44,y:20,type:'elite'},
+{x:12,y:30,type:'bat'},
+{x:48,y:30,type:'zombie'}
 ],
 items:[
 {x:12,y:20,type:'cell'},
@@ -138,14 +160,23 @@ decos:[
 {x:35,y:13,type:'chain'}
 ],
 iceOverlays:[
-{x:10,y:31},{x:11,y:31},{x:12,y:31},{x:13,y:31},{x:14,y:31},{x:15,y:31},{x:16,y:31},{x:17,y:31},{x:30,y:31},{x:31,y:31},{x:32,y:31},{x:33,y:31},{x:34,y:31},{x:35,y:31},{x:36,y:31},{x:37,y:31},{x:38,y:31},{x:39,y:31},{x:40,y:31},{x:41,y:31},{x:16,y:18},{x:17,y:18},{x:18,y:18},{x:19,y:18},{x:20,y:18},{x:21,y:18},{x:22,y:18},{x:23,y:18},{x:24,y:18},{x:10,y:7},{x:11,y:7},{x:12,y:7},{x:13,y:7},{x:14,y:7},{x:15,y:7},{x:16,y:7},{x:17,y:7},{x:18,y:7},{x:19,y:7},{x:5,y:32},{x:4,y:32}
+{x:10,y:31},{x:11,y:31},{x:12,y:31},{x:13,y:31},{x:14,y:31},{x:15,y:31},{x:16,y:31},{x:17,y:31},{x:30,y:31},{x:31,y:31},{x:32,y:31},{x:33,y:31},{x:34,y:31},{x:41,y:31},{x:16,y:18},{x:17,y:18},{x:18,y:18},{x:19,y:18},{x:20,y:18},{x:21,y:18},{x:22,y:18},{x:23,y:18},{x:24,y:18},{x:10,y:7},{x:11,y:7},{x:12,y:7},{x:13,y:7},{x:14,y:7},{x:15,y:7},{x:16,y:7},{x:17,y:7},{x:18,y:7},{x:19,y:7},{x:5,y:32},{x:4,y:32},
+{x:20,y:29},{x:21,y:29},{x:36,y:29},{x:37,y:29},{x:24,y:24},{x:25,y:24},{x:30,y:22},{x:31,y:22},{x:27,y:6},{x:28,y:6},{x:29,y:6},{x:30,y:6},{x:31,y:6},{x:32,y:6}
+],
+// tempting low bridges over the spike trenches that collapse underfoot
+crumbles:[
+{x:20,y:31,w:2},
+{x:36,y:31,w:2}
 ],
 traps:[
 {x:5,y:21,rotate:0,fireRate:100,projectileSpeed:8,damage:12},
 {x:54,y:21,rotate:180,fireRate:120,projectileSpeed:8,damage:12},
 {x:25,y:4,rotate:90,fireRate:90,projectileSpeed:7,damage:10},
 {x:35,y:4,rotate:90,fireRate:80,projectileSpeed:7,damage:10},
-{x:15,y:4,rotate:90,fireRate:130,projectileSpeed:9,damage:14}
+{x:15,y:4,rotate:90,fireRate:130,projectileSpeed:9,damage:14},
+{x:1,y:30,rotate:0,fireRate:150,projectileSpeed:7,damage:12},
+{x:58,y:30,rotate:180,fireRate:150,projectileSpeed:7,damage:12},
+{x:1,y:24,rotate:0,fireRate:170,projectileSpeed:7,damage:11}
 ],
 mossWalls:[
 {x:15,y:10,rotate:90},
@@ -1378,11 +1409,16 @@ portal:{x:55,y:29},
                         type: 'cell'
                     },
                 ],
-                decos: [{
-                    x: 6,
-                    y: 28,
-                    type: 'torch'
-                },
+                decos: [
+                    // ---- boss arena dressing (right side, around the sealed portal) ----
+                    {x:70,y:30,type:'brazier'},{x:82,y:30,type:'brazier'},
+                    {x:67,y:30,type:'statue'},{x:85,y:30,type:'statue'},
+                    {x:73,y:4,type:'banner'},{x:80,y:4,type:'banner'},
+                    {x:75,y:2,type:'chain'},{x:78,y:2,type:'chain'},
+                    {x:69,y:26,type:'torch'},{x:83,y:26,type:'torch'},
+                    {x:71,y:31,type:'skullpile'},{x:81,y:31,type:'bones'},
+                    {x:76,y:3,type:'cage'},
+                    {x:6,y:28,type:'torch'},
                     {
                         x: 14,
                         y: 28,
