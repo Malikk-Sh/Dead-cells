@@ -1223,7 +1223,39 @@ c.save();c.globalCompositeOperation='lighter';c.fillStyle='#9fff3a';c.shadowColo
 const jaw=1+Math.sin(t9/240+this.x)*0.7;c.fillStyle='#160c06';c.beginPath();c.ellipse(1.5,-h/2+8+b,3.4,jaw+1.5,0,0,Math.PI*2);c.fill();
 c.fillStyle='#d8d2b0';for(let k=0;k<4;k++){const tx3=-1.5+k*2;c.beginPath();c.moveTo(tx3,-h/2+6.6+b);c.lineTo(tx3+0.8,-h/2+8+b);c.lineTo(tx3+1.6,-h/2+6.6+b);c.closePath();c.fill();}
 if((this.x|0)%2===0){c.fillStyle='rgba(150,200,80,0.55)';c.fillRect(1,-h/2+9.5+b,1.1,2.5+Math.sin(t9/300)*1.4);}
-}else if(this.type==='bat'){const wp=Math.sin(Date.now()/50+this.x)*0.9;c.save();c.rotate(wp);c.fillStyle='#3a1a4a';c.beginPath();c.moveTo(-2,0);c.lineTo(-w/2-7,-5);c.lineTo(-w/2-2,-1);c.lineTo(-w/2-6,4);c.closePath();c.fill();c.fillStyle='#5a2a6a';c.beginPath();c.moveTo(-2,0);c.lineTo(-w/2-4,-2);c.lineTo(-w/2,2);c.closePath();c.fill();c.restore();c.save();c.rotate(-wp);c.fillStyle='#3a1a4a';c.beginPath();c.moveTo(2,0);c.lineTo(w/2+7,-5);c.lineTo(w/2+2,-1);c.lineTo(w/2+6,4);c.closePath();c.fill();c.fillStyle='#5a2a6a';c.beginPath();c.moveTo(2,0);c.lineTo(w/2+4,-2);c.lineTo(w/2,2);c.closePath();c.fill();c.restore();c.fillStyle='#4a2a5a';c.beginPath();c.arc(0,0,5,0,Math.PI*2);c.fill();c.fillStyle='#2a152f';c.beginPath();c.moveTo(-4,-4);c.lineTo(-2,-7);c.lineTo(-1,-4);c.fill();c.beginPath();c.moveTo(4,-4);c.lineTo(2,-7);c.lineTo(1,-4);c.fill();c.fillStyle='#ff2266';c.shadowColor='#f06';c.shadowBlur=this.isDiving?11:5;c.fillRect(-2.5,-2,2,2.5);c.fillRect(1,-2,2,2.5);c.shadowBlur=0;c.fillStyle='#fff';c.fillRect(-1.5,3,1,2);c.fillRect(1,3,1,2);if(this.isDiving){c.fillStyle='rgba(255,0,102,0.5)';c.fillRect(-7,-8,14,2);}
+}else if(this.type==='bat'){
+// ---- membranous wings that actually fold ----
+// The wing beat drives both rotation *and* a horizontal squash, because a real wing foreshortens
+// as it sweeps toward the viewer. Two-tone membrane with visible finger bones turns a flat triangle
+// into something that reads as skin stretched over a hand.
+const bt=Date.now()/(this.isDiving?36:64)+this.x;const wp=Math.sin(bt)*0.95,fold=0.45+Math.abs(Math.cos(bt))*0.55;
+const wing=(sgn)=>{c.save();c.rotate(wp*sgn);c.scale(fold,1);
+ const X=(v)=>sgn*v;
+ // membrane
+ c.fillStyle='#331546';c.beginPath();c.moveTo(X(2),-1);
+ c.quadraticCurveTo(X(w/2+4),-9,X(w/2+11),-4);
+ c.lineTo(X(w/2+6),0);c.lineTo(X(w/2+10),5);
+ c.quadraticCurveTo(X(w/2+2),4,X(2),2);c.closePath();c.fill();
+ // lit upper membrane
+ c.fillStyle='#5c2b74';c.beginPath();c.moveTo(X(2),-1);
+ c.quadraticCurveTo(X(w/2+2),-7,X(w/2+8),-4);c.lineTo(X(w/2+3),-0.5);c.closePath();c.fill();
+ // finger bones
+ c.strokeStyle='#7a4a94';c.lineWidth=0.9;
+ c.beginPath();c.moveTo(X(2),0);c.lineTo(X(w/2+10),-4);c.moveTo(X(2),0);c.lineTo(X(w/2+6),0.4);c.moveTo(X(2),0);c.lineTo(X(w/2+9),5);c.stroke();
+ c.restore();};
+wing(-1);wing(1);
+// furry body with a lit crown and a dark belly
+c.fillStyle=linGrad(c,'batb',0,-6,0,6,[[0,'#6d4183'],[0.5,'#43254f'],[1,'#25142c']]);c.beginPath();c.ellipse(0,0,5,5.6,0,0,Math.PI*2);c.fill();
+c.fillStyle='#8a5aa4';c.beginPath();c.ellipse(0,-2.6,3.4,2.2,0,0,Math.PI*2);c.fill();
+// ears
+c.fillStyle='#2a152f';c.beginPath();c.moveTo(-4,-4);c.lineTo(-2.4,-8.4);c.lineTo(-0.8,-4);c.fill();c.beginPath();c.moveTo(4,-4);c.lineTo(2.4,-8.4);c.lineTo(0.8,-4);c.fill();
+c.fillStyle='#5c3070';c.beginPath();c.moveTo(-3.4,-4.4);c.lineTo(-2.5,-7.2);c.lineTo(-1.6,-4.4);c.fill();c.beginPath();c.moveTo(3.4,-4.4);c.lineTo(2.5,-7.2);c.lineTo(1.6,-4.4);c.fill();
+// eyes burn brighter the instant it commits to a dive — the tell that it is coming for you
+c.save();c.globalCompositeOperation='lighter';c.fillStyle=this.isDiving?'#ff4a7a':'#ff2266';c.shadowColor='#f06';c.shadowBlur=this.isDiving?12:6;
+c.beginPath();c.ellipse(-2,-1.4,1.3,1.5,0,0,Math.PI*2);c.fill();c.beginPath();c.ellipse(2,-1.4,1.3,1.5,0,0,Math.PI*2);c.fill();c.restore();c.shadowBlur=0;
+c.fillStyle='#fff';c.fillRect(-1.6,3,1.1,2.2);c.fillRect(0.9,3,1.1,2.2);
+if(this.isDiving){c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.45;c.fillStyle='#ff2266';
+ for(let k=1;k<4;k++){c.globalAlpha=0.3/k;c.beginPath();c.ellipse(0,-k*5,5-k*0.8,5.6-k,0,0,Math.PI*2);c.fill();}c.restore();}
 }else if(this.type==='skeleton'){
 // dark cavity behind the ribs, so the cage reads as an empty chest rather than a flat decal
 c.fillStyle='rgba(6,10,6,0.75)';c.beginPath();c.ellipse(0.5,-h/2+16+b,w/2-2.5,9,0,0,Math.PI*2);c.fill();
@@ -1245,17 +1277,47 @@ c.save();c.globalCompositeOperation='lighter';c.fillStyle='#ff3020';c.shadowColo
 c.fillStyle='#0a0a08';c.beginPath();c.moveTo(1,-h/2+4+b);c.lineTo(2,-h/2+7+b);c.lineTo(0,-h/2+7+b);c.closePath();c.fill();
 c.fillStyle='#0a0a08';c.fillRect(-4,-h/2+8.6+b,10,0.9);c.fillStyle='#d6d6be';for(let k=0;k<5;k++)c.fillRect(-3.6+k*2,-h/2+8+b,1.2,2.2);
 c.save();const dp=this.isDrawing?this.drawTimer/this.maxDraw:0;c.translate(4,0);c.rotate(-.3);c.strokeStyle='#886633';c.lineWidth=2;c.beginPath();c.arc(8,0,14,-.9,.9);c.stroke();const pb=dp*8;c.strokeStyle='#aaa';c.lineWidth=1;c.beginPath();c.moveTo(8+Math.cos(-.9)*14,Math.sin(-.9)*14);if(this.isDrawing)c.lineTo(8-pb,0);c.lineTo(8+Math.cos(.9)*14,Math.sin(.9)*14);c.stroke();if(this.isDrawing){c.fillStyle='#aa8866';c.save();c.translate(8-pb,0);c.fillRect(0,-1,16,2);c.fillStyle='#888';c.beginPath();c.moveTo(16,-2);c.lineTo(19,0);c.lineTo(16,2);c.closePath();c.fill();c.restore();}c.restore();c.fillStyle='#aaa988';c.fillRect(-3,h/2-8,2,8);c.fillRect(3,h/2-8,2,8);
-}else if(this.type==='elite'){c.fillStyle='#2a0a0a';c.fillRect(-4,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.shadowColor='#ff4400';c.shadowBlur=12;
-// armour plate with a hot top light, a deep core shadow and an ember bounce at the hem
-c.fillStyle=linGrad(c,'eg2'+h,0,-h/2,0,h/2,[[0,'#d43424'],[0.45,'#7a1010'],[0.82,'#3d0808'],[1,'#671010']]);c.fillRect(-w/2+1,-h/2+4+b,w-2,h-11);c.shadowBlur=0;
-// riveted plate seams + rim light down the leading edge
-c.fillStyle='rgba(0,0,0,0.35)';c.fillRect(-w/2+1,-h/2+12+b,w-2,1.6);c.fillRect(-w/2+1,-h/2+21+b,w-2,1.6);
-c.fillStyle='rgba(255,170,110,0.45)';c.fillRect(w/2-2.4,-h/2+6+b,1.6,h-15);
-c.fillStyle='rgba(0,0,0,0.45)';c.fillRect(-w/2+1,-h/2+6+b,1.6,h-15);
-c.fillStyle='#c8763a';for(let rv=0;rv<3;rv++)c.beginPath(),c.arc(-w/2+3.5,-h/2+9+b+rv*8,1,0,Math.PI*2),c.fill();c.strokeStyle='#ff6a1a';c.lineWidth=1;c.beginPath();c.moveTo(-4,-h/2+9+b);c.lineTo(-1,-h/2+17+b);c.lineTo(3,-h/2+14+b);c.stroke();c.fillStyle='#7a1414';c.fillRect(-6,-h/2-2+b,14,12);
+}else if(this.type==='elite'){c.fillStyle='#2a0a0a';c.fillRect(-4,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.shadowColor='#ff4400';c.shadowBlur=6;
+// ---- ARMOURED TORSO ----
+// Shaped rather than rectangular: broad at the shoulders, tapering to the waist. Blackened iron
+// with only a narrow hot rim, so the figure reads as heavy armour lit by its own inner furnace
+// instead of a slab of flat red — saturation is spent on the glow, not the plate.
+c.fillStyle=linGrad(c,'eg3'+h,0,-h/2,0,h/2,[[0,'#6e2018'],[0.34,'#48100e'],[0.74,'#260706'],[1,'#3a0d0a']]);
+c.beginPath();c.moveTo(-w/2-1,-h/2+6+b);c.lineTo(w/2+1,-h/2+6+b);c.lineTo(w/2-2,h/2-9+b);
+c.quadraticCurveTo(0,h/2-6+b,-w/2+2,h/2-9+b);c.closePath();c.fill();c.shadowBlur=0;
+// molten seams glowing between the plates
+c.save();c.globalCompositeOperation='lighter';c.fillStyle='rgba(255,110,30,0.42)';
+c.fillRect(-w/2+2,-h/2+13+b,w-4,1.3);c.fillRect(-w/2+2.5,-h/2+22+b,w-5,1.1);c.restore();
+c.fillStyle='rgba(0,0,0,0.42)';c.fillRect(-w/2+2,-h/2+14.3+b,w-4,1.4);c.fillRect(-w/2+2.5,-h/2+23.1+b,w-5,1.2);
+// rim light on the leading edge, deep shadow on the trailing one
+c.fillStyle='rgba(255,150,80,0.5)';c.fillRect(w/2-3,-h/2+8+b,1.7,h-19);
+c.fillStyle='rgba(0,0,0,0.5)';c.fillRect(-w/2+1,-h/2+8+b,1.8,h-19);
+// pauldron over the shoulder + rivets
+c.fillStyle='#5c1a14';c.beginPath();c.ellipse(0,-h/2+8+b,w/2+1.5,5,0,Math.PI,0);c.fill();
+c.fillStyle='#8a2d20';c.beginPath();c.ellipse(0.5,-h/2+7+b,w/2-1,2.6,0,Math.PI,0);c.fill();
+c.fillStyle='#c8763a';for(let rv=0;rv<3;rv++){c.beginPath();c.arc(-w/2+4,-h/2+12+b+rv*8,1,0,Math.PI*2);c.fill();}c.strokeStyle='#ff6a1a';c.lineWidth=1;c.beginPath();c.moveTo(-4,-h/2+9+b);c.lineTo(-1,-h/2+17+b);c.lineTo(3,-h/2+14+b);c.stroke();c.fillStyle='#7a1414';c.fillRect(-6,-h/2-2+b,14,12);
 // curved demon horns
 c.strokeStyle='#1a0606';c.lineWidth=3.5;c.lineCap='round';c.beginPath();c.moveTo(-5,-h/2-1+b);c.quadraticCurveTo(-13,-h/2-6+b,-11,-h/2-14+b);c.moveTo(7,-h/2-1+b);c.quadraticCurveTo(15,-h/2-6+b,13,-h/2-14+b);c.stroke();c.strokeStyle='#3a1010';c.lineWidth=1.4;c.beginPath();c.moveTo(-5,-h/2-1+b);c.quadraticCurveTo(-13,-h/2-6+b,-11,-h/2-14+b);c.moveTo(7,-h/2-1+b);c.quadraticCurveTo(15,-h/2-6+b,13,-h/2-14+b);c.stroke();c.lineCap='butt';
-c.fillStyle='#3a0808';c.beginPath();c.moveTo(-6,-h/2-2+b);c.lineTo(-10,-h/2-9+b);c.lineTo(-4,-h/2-2+b);c.fill();c.beginPath();c.moveTo(8,-h/2-2+b);c.lineTo(12,-h/2-9+b);c.lineTo(6,-h/2-2+b);c.fill();c.fillStyle='#ffcc22';c.shadowColor='#ff6600';c.shadowBlur=8;c.fillRect(-2,-h/2+3+b,3,2);c.fillRect(5,-h/2+3+b,3,2);c.shadowBlur=0;c.save();c.translate(w/2-2,0+b);c.rotate(-0.5);c.fillStyle='#8a2a2a';c.fillRect(0,-2,10,4);c.fillStyle='#dde';c.fillRect(8,-4,17,3);c.fillStyle='#99a';c.fillRect(8,1,17,3);c.restore();}else if(this.type==='caster'){const chg=this.castPhase==='charge',fl=chg?(1-this.chargeT/42):0;c.fillStyle=linGrad(c,'cr'+h,0,-h/2,0,h/2,[[0,'#3a1a5a'],[1,'#1e0e30']]);c.beginPath();c.moveTo(-w/2+2,-h/2+8+b);c.lineTo(w/2-2,-h/2+8+b);c.lineTo(w/2+2,h/2+b);c.lineTo(-w/2-2,h/2+b);c.closePath();c.fill();c.fillStyle='#7a40c0';c.fillRect(-w/2,-h/2+8+b,w,2);c.fillStyle='#2a1444';c.beginPath();c.moveTo(-6,-h/2-4+b);c.lineTo(6,-h/2-4+b);c.lineTo(8,-h/2+9+b);c.lineTo(-8,-h/2+9+b);c.closePath();c.fill();c.fillStyle='#e0a0ff';c.shadowColor='#c060ff';c.shadowBlur=8;c.fillRect(-4,-h/2+2+b,2.5,2);c.fillRect(2,-h/2+2+b,2.5,2);c.shadowBlur=0;c.save();c.translate(w/2-2,-2+b);c.fillStyle='#5a3a20';c.fillRect(-1,-14,2.5,26);const oyy=-16;c.globalCompositeOperation='lighter';const orbR=5+fl*4+Math.sin(Date.now()/120)*1;halo(c,0.5,oyy,orbR*2,'#e6aaff',0.95);c.globalAlpha=1;c.fillStyle='#f0d0ff';c.beginPath();c.arc(0.5,oyy,orbR*0.5,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='shield'){const wu=this.isWindingUp?1:0;c.fillStyle='#2a2a34';c.fillRect(-5,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.fillStyle=linGrad(c,'sh'+h,0,-h/2,0,h/2,[[0,'#4a5060'],[1,'#2a2e3a']]);c.fillRect(-w/2+2,-h/2+6+b,w-4,h-13);c.fillStyle='#20242e';c.fillRect(-w/2+2,-h/2+13+b,w-4,1.5);c.fillRect(-w/2+2,-h/2+20+b,w-4,1.5);c.fillStyle='#5a6070';c.fillRect(-5,-h/2-2+b,12,11);c.fillStyle='#0a0a10';c.fillRect(-4,-h/2+2+b,10,3);c.fillStyle='#ff5a3a';c.shadowColor='#f30';c.shadowBlur=5;c.fillRect(-2,-h/2+3+b,2,2);c.fillRect(3,-h/2+3+b,2,2);c.shadowBlur=0;c.fillStyle='#8a2030';c.fillRect(-1,-h/2-6+b,3,6);c.save();c.translate(w/2-1+wu*Math.sin(Date.now()/40)*2,b);c.fillStyle='#7a5230';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(10,-h/2+6);c.lineTo(10,h/2-4);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#4a3016';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(3,-h/2+3);c.lineTo(3,h/2-1);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#9a9aa8';c.fillRect(3,-h/2+5,4,h-9);c.fillStyle='#c0c0cc';c.beginPath();c.arc(5,0,4,0,Math.PI*2);c.fill();c.fillStyle='#6a6a78';c.beginPath();c.arc(5,0,2,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='wisp'){
+c.fillStyle='#3a0808';c.beginPath();c.moveTo(-6,-h/2-2+b);c.lineTo(-10,-h/2-9+b);c.lineTo(-4,-h/2-2+b);c.fill();c.beginPath();c.moveTo(8,-h/2-2+b);c.lineTo(12,-h/2-9+b);c.lineTo(6,-h/2-2+b);c.fill();c.fillStyle='#ffcc22';c.shadowColor='#ff6600';c.shadowBlur=8;c.fillRect(-2,-h/2+3+b,3,2);c.fillRect(5,-h/2+3+b,3,2);c.shadowBlur=0;c.save();c.translate(w/2-2,0+b);c.rotate(-0.5);c.fillStyle='#8a2a2a';c.fillRect(0,-2,10,4);c.fillStyle='#dde';c.fillRect(8,-4,17,3);c.fillStyle='#99a';c.fillRect(8,1,17,3);c.restore();}else if(this.type==='caster'){const chg=this.castPhase==='charge',fl=chg?(1-this.chargeT/42):0;// ---- ROBED CASTER ----
+// Cloth, not a board: the hem flares and ripples, the fabric falls into deep shadow between folds,
+// and the only bright value on the whole figure is the light its own magic throws up under the hood.
+c.fillStyle=linGrad(c,'cr2'+h,0,-h/2,0,h/2,[[0,'#4a2472'],[0.4,'#2a1244'],[0.85,'#150a24'],[1,'#241040']]);
+c.beginPath();c.moveTo(-w/2+2,-h/2+8+b);c.lineTo(w/2-2,-h/2+8+b);
+c.quadraticCurveTo(w/2+4,h/2-8+b,w/2+3,h/2+b);
+// a ragged, uneven hem so the robe ends in cloth rather than a ruled line
+for(let k=4;k>=0;k--){const hx=-w/2-3+(k/4)*(w+6);c.lineTo(hx,h/2+b-((k*7+(this.x|0))%4));}
+c.quadraticCurveTo(-w/2-4,h/2-8+b,-w/2+2,-h/2+8+b);c.closePath();c.fill();
+// vertical fold shadows
+c.fillStyle='rgba(0,0,0,0.30)';for(let k=0;k<3;k++)c.fillRect(-w/2+4+k*(w/3.4),-h/2+11+b,1.6,h-14);
+c.fillStyle='rgba(190,130,255,0.20)';for(let k=0;k<3;k++)c.fillRect(-w/2+5.6+k*(w/3.4),-h/2+11+b,0.9,h-14);
+// shoulder yoke
+c.fillStyle='#7a40c0';c.fillRect(-w/2,-h/2+8+b,w,2);c.fillStyle='#a866f0';c.fillRect(-w/2,-h/2+8+b,w,0.9);
+// hood — a pointed cowl with a black void where the face should be
+c.fillStyle='#2a1444';c.beginPath();c.moveTo(-7,-h/2+10+b);c.quadraticCurveTo(-7,-h/2-8+b,1,-h/2-9+b);
+c.quadraticCurveTo(9,-h/2-8+b,9,-h/2+10+b);c.closePath();c.fill();
+c.fillStyle='#3d1f5e';c.beginPath();c.moveTo(-7,-h/2+10+b);c.quadraticCurveTo(-6,-h/2-6+b,1,-h/2-7+b);c.quadraticCurveTo(3,-h/2-6+b,2,-h/2+10+b);c.closePath();c.fill();
+c.fillStyle='#08040e';c.beginPath();c.ellipse(1,-h/2+3+b,5.2,5.6,0,0,Math.PI*2);c.fill();
+c.fillStyle='#e0a0ff';c.shadowColor='#c060ff';c.shadowBlur=8;c.fillRect(-2.6,-h/2+2+b,2.5,2);c.fillRect(1.8,-h/2+2+b,2.5,2);c.shadowBlur=0;c.save();c.translate(w/2-2,-2+b);c.fillStyle='#5a3a20';c.fillRect(-1,-14,2.5,26);const oyy=-16;c.globalCompositeOperation='lighter';const orbR=5+fl*4+Math.sin(Date.now()/120)*1;halo(c,0.5,oyy,orbR*2,'#e6aaff',0.95);c.globalAlpha=1;c.fillStyle='#f0d0ff';c.beginPath();c.arc(0.5,oyy,orbR*0.5,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='shield'){const wu=this.isWindingUp?1:0;c.fillStyle='#2a2a34';c.fillRect(-5,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.fillStyle=linGrad(c,'sh'+h,0,-h/2,0,h/2,[[0,'#4a5060'],[1,'#2a2e3a']]);c.fillRect(-w/2+2,-h/2+6+b,w-4,h-13);c.fillStyle='#20242e';c.fillRect(-w/2+2,-h/2+13+b,w-4,1.5);c.fillRect(-w/2+2,-h/2+20+b,w-4,1.5);c.fillStyle='#5a6070';c.fillRect(-5,-h/2-2+b,12,11);c.fillStyle='#0a0a10';c.fillRect(-4,-h/2+2+b,10,3);c.fillStyle='#ff5a3a';c.shadowColor='#f30';c.shadowBlur=5;c.fillRect(-2,-h/2+3+b,2,2);c.fillRect(3,-h/2+3+b,2,2);c.shadowBlur=0;c.fillStyle='#8a2030';c.fillRect(-1,-h/2-6+b,3,6);c.save();c.translate(w/2-1+wu*Math.sin(Date.now()/40)*2,b);c.fillStyle='#7a5230';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(10,-h/2+6);c.lineTo(10,h/2-4);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#4a3016';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(3,-h/2+3);c.lineTo(3,h/2-1);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#9a9aa8';c.fillRect(3,-h/2+5,4,h-9);c.fillStyle='#c0c0cc';c.beginPath();c.arc(5,0,4,0,Math.PI*2);c.fill();c.fillStyle='#6a6a78';c.beginPath();c.arc(5,0,2,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='wisp'){
 const tw=Date.now(),fl=this.fusing?(this.fuseT%6<3?1:0):0;const pl2=0.7+Math.sin(tw/90+this.x)*0.3;
 c.save();c.globalCompositeOperation='lighter';halo(c,0,0,14*pl2+fl*6,fl?'#ff78ff':'#be82ff',fl?0.95:0.85);c.restore();
 c.fillStyle=fl?'#ffd0ff':'#e0c8ff';c.beginPath();c.arc(0,0,4,0,Math.PI*2);c.fill();
@@ -1857,7 +1919,7 @@ if(this.mossWalls.length<2){let placed=0;for(let tx=4;tx<W2-4&&placed<2;tx++){fo
 // ARROW TRAPS: mount 1-2 in walls overlooking an open corridor
 if(this.arrowTraps.length<2){let placed=0;for(let ty=4;ty<H2-3&&placed<2;ty++){for(let tx=3;tx<W2-9&&placed<2;){if(!solidAt(tx,ty)){tx++;continue;}let clearR=0;for(let k=1;k<=8;k++){if(openAt(tx+k,ty)&&openAt(tx+k,ty+1))clearR++;else break;}if(clearR>=6&&openAt(tx+1,ty-1)){this.arrowTraps.push(new ArrowTrap(tx,ty,{rotate:0,fireRate:160,projectileSpeed:6.5,damage:12}));placed++;tx+=9;}else tx++;}}}
 }
-this.buildTerrainProps();
+this.buildTerrainProps();this.buildForeground();
 const sp=ld.spawn;this.player.x=sp.x*32;this.player.y=sp.y*32;this.player.onIce=false;this.player.onMoss=false;this.player.vx=0;this.player.vy=0;this.player.hp=this.player.mhp;this.player.inv=0;this.player.atk=false;this.player.rl=false;this.player.maxFallSpeed=0;this.portalPos={x:ld.portal.x*32,y:ld.portal.y*32};this.levelName=ld.name;this.levelNameTimer=180;this.state='playing';this.stats.st=Date.now();this.actualLvl=li;SFX.stopMusic();}
 
 // ===================== PROCEDURAL TERRAIN ENRICHMENT =====================
@@ -1942,6 +2004,70 @@ buildTerrainProps(){
  // Auto-placed wall torches join the real deco list so they light the scene like authored ones,
  // which is how the enrichment pass contributes to atmosphere and not just to silhouette.
  for(const cd of kept)if(cd.type==='wallTorch')this.decos.push({x:cd.tx*32+(cd.side>0?26:-26),y:cd.ty*32+16,type:'torch',auto:true});
+}
+
+// ===== FOREGROUND OCCLUSION LAYER =====
+// Everything else in the scene sits at or behind the play plane, which leaves the frame feeling
+// like a flat diorama however much detail goes into it. A layer of near-black silhouettes drifting
+// *in front of* the action at greater-than-one parallax fixes that in one stroke: it gives the eye
+// something unambiguously closer than the character to measure depth against, and the extra
+// parallax speed makes the world read as genuinely three-dimensional as the camera pans.
+// Kept pure silhouette (no interior detail, heavy darkness) so it frames the action without ever
+// competing with it or hiding a threat — shapes are seeded away from the vertical middle band
+// where gameplay happens.
+buildForeground(){
+ const w=this.world;this.fg=[];const rngSeed=(this.lvl*3301+77)|0;
+ const n=10;
+ for(let i=0;i<n;i++){
+  const r1=NZ.h2(i*13,7,rngSeed),r2=NZ.h2(i*13,19,rngSeed),r3=NZ.h2(i*13,31,rngSeed);
+  this.fg.push({x:r1*w.pw,y:r2*w.ph,
+   kind:r3<0.42?'pillar':r3<0.78?'frond':'rubble',
+   s:0.7+NZ.h2(i*13,43,rngSeed)*0.9,
+   par:1.18+NZ.h2(i*13,57,rngSeed)*0.22,
+   ph:r1*99});}
+}
+drawForeground(c,cam,vw,vh){
+ if(!this.fg||PERF.tier>1)return;const t=Date.now();
+ const pScr=(this.player.x+this.player.w/2-cam.x);
+ c.save();
+ for(const f of this.fg){
+  // parallax > 1 means these slide past faster than the world behind them
+  const sx=f.x-cam.x*f.par,sy=f.y-cam.y*f.par;
+  const dx=((sx%this.world.pw)+this.world.pw)%this.world.pw;
+  for(const ox of [dx-this.world.pw,dx,dx+this.world.pw]){
+   if(ox<-260||ox>vw+260)continue;const oy=sy;
+   // A foreground element must never cost the player sight of themselves. Anything the character
+   // walks behind dissolves toward transparent as they approach — the depth cue is worth having,
+   // but not at the price of hiding the thing you are controlling.
+   const near=U.clamp(1-Math.abs(pScr-(ox+22*f.s))/110,0,1);
+   c.globalAlpha=0.86-near*0.66;
+   c.fillStyle='#03080a';
+   if(f.kind==='pillar'){
+    const pw2=26*f.s,ph2=vh*1.6;
+    c.fillRect(ox,oy-ph2*0.5,pw2,ph2);
+    // capital and base flare, so it reads as a column rather than a bar
+    c.fillRect(ox-6*f.s,oy-ph2*0.5,pw2+12*f.s,14*f.s);
+    c.fillRect(ox-6*f.s,oy+ph2*0.5-14*f.s,pw2+12*f.s,14*f.s);
+    // a whisper of edge light down one side keeps the silhouette from reading as a hole in the
+    // frame; masonry courses give it just enough scale to be legible as stone
+    c.globalAlpha*=0.5;c.fillStyle='#1d3b3c';c.fillRect(ox+pw2-2.5,oy-ph2*0.5,2.5,ph2);
+    c.globalAlpha*=0.6;c.fillStyle='#000';
+    for(let k=0;k<14;k++)c.fillRect(ox,oy-ph2*0.5+18+k*(ph2/14),pw2,1.6);
+   }else if(f.kind==='frond'){
+    // a heavy bough hanging into the top of the frame, swaying slowly
+    const sway=Math.sin(t/2400+f.ph)*7*f.s;
+    c.beginPath();c.moveTo(ox,oy-90*f.s);
+    c.quadraticCurveTo(ox+30*f.s+sway,oy-40*f.s,ox+16*f.s+sway,oy+30*f.s);
+    c.quadraticCurveTo(ox+52*f.s+sway,oy-16*f.s,ox+26*f.s,oy-90*f.s);
+    c.closePath();c.fill();
+    for(let l=0;l<5;l++){const q=(l+1)/6,lx=ox+13*f.s+sway*q,ly=oy-90*f.s+120*f.s*q;
+     c.beginPath();c.ellipse(lx+(l%2?24:-20)*f.s,ly,20*f.s,9*f.s,(l%2?0.5:-0.5),0,Math.PI*2);c.fill();}
+   }else{
+    // a broken block sitting on the very front plane
+    c.beginPath();c.moveTo(ox,oy+40*f.s);c.lineTo(ox+10*f.s,oy-16*f.s);c.lineTo(ox+54*f.s,oy-6*f.s);
+    c.lineTo(ox+66*f.s,oy+40*f.s);c.closePath();c.fill();}
+  }}
+ c.restore();
 }
 
 drawTerrainProps(c,cam,vw,vh){
@@ -2921,7 +3047,9 @@ if(this.state==='playing'){c.save();if(this.player.inv>0)c.globalAlpha=.5+Math.s
 for(const ar of this.arrows)ar.draw(c,cam);for(const o of this.orbs)o.draw(c,cam);for(const sw of this.shockwaves)sw.draw(c,cam);for(const g2 of this.globs)g2.draw(c,cam);this._zoomNow=zoom;this._camNow=cam;
 for(const pl of this.pools){const px2=pl.x-cam.x,py2=pl.y-cam.y;if(px2>-50&&px2<canvas.width+50){const a=Math.min(1,pl.life/60);c.save();c.globalAlpha=a*0.85;c.fillStyle='#4a8a20';c.beginPath();c.ellipse(px2+pl.w/2,py2+4,pl.w/2,4,0,0,Math.PI*2);c.fill();c.fillStyle='#7fd030';c.beginPath();c.ellipse(px2+pl.w/2,py2+3,pl.w/2-3,2.5,0,0,Math.PI*2);c.fill();c.globalCompositeOperation='lighter';c.fillStyle='rgba(160,255,80,0.25)';c.beginPath();c.ellipse(px2+pl.w/2,py2+2,pl.w/2,5,0,0,Math.PI*2);c.fill();c.restore();}}
 for(const v of this.vents)v.draw(c,cam);
-for(const b of this.bombs)b.draw(c,cam);this.particles.draw(c,cam);for(const f of this.ft)f.draw(c,cam);c.restore();this.drawLighting(c,cam,zoom);this.drawPost(c);this.drawHUD(c);
+for(const b of this.bombs)b.draw(c,cam);this.particles.draw(c,cam);
+this.drawForeground(c,cam,vw,vh);
+for(const f of this.ft)f.draw(c,cam);c.restore();this.drawLighting(c,cam,zoom);this.drawPost(c);this.drawHUD(c);
 if(!this._vgA||this._vgAW!==canvas.width||this._vgAH!==canvas.height){this._vgAW=canvas.width;this._vgAH=canvas.height;const vg=c.createRadialGradient(canvas.width/2,canvas.height/2,canvas.width*.3,canvas.width/2,canvas.height/2,canvas.width*.66);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.22)');this._vgA=vg;}
 c.fillStyle=this._vgA;c.fillRect(0,0,canvas.width,canvas.height);
 if(BG.pal){if(!this._gr2||this._gr2H!==canvas.height||this._gr2Ray!==BG.pal.ray){this._gr2H=canvas.height;this._gr2Ray=BG.pal.ray;const gr2=c.createLinearGradient(0,0,0,canvas.height*0.5);gr2.addColorStop(0,BG.pal.ray+'0.06)');gr2.addColorStop(1,BG.pal.ray+'0)');this._gr2=gr2;}c.save();c.globalCompositeOperation='lighter';c.fillStyle=this._gr2;c.fillRect(0,0,canvas.width,canvas.height*0.5);c.restore();}
