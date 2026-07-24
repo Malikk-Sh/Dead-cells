@@ -1473,7 +1473,11 @@ bakeNoise(){const n=this.tw*this.th;
 nAt(a,x,y){return (x>=0&&y>=0&&x<this.tw&&y<this.th)?a[y*this.tw+x]:0.5;}
 getTilesAround(x,y,w,h){const ts=this.ts,r=[];const sx=Math.max(0,Math.floor(x/ts)-1),ex=Math.min(this.tw-1,Math.floor((x+w)/ts)+1);const sy=Math.max(0,Math.floor(y/ts)-1),ey=Math.min(this.th-1,Math.floor((y+h)/ts)+1);for(let ty=sy;ty<=ey;ty++)for(let tx=sx;tx<=ex;tx++)if(this.tiles[ty]&&this.tiles[ty][tx]>0)r.push({x:tx*ts,y:ty*ts,w:ts,h:ts,type:this.tiles[ty][tx]});return r;}
 isSolid(tx,ty){return ty>=0&&ty<this.th&&tx>=0&&tx<this.tw&&this.tiles[ty][tx]===1;}
-draw(c,cam,vw,vh){vw=vw||canvas.width;vh=vh||canvas.height;const ts=this.ts,sx=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(this.tw-1,Math.floor((cam.x+vw)/ts)+1),sy=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(this.th-1,Math.floor((cam.y+vh)/ts)+1);// Foreground masonry is deliberately pushed a step warmer and lighter than the background hue.
+// One row/column of margin on every side. Several details deliberately overhang their own tile —
+// the moss cap sits above the stone, icicles hang below it — so culling exactly to the viewport
+// makes them pop in at the screen edge as the camera moves. The margin costs one extra ring of
+// tiles and removes the artefact entirely.
+draw(c,cam,vw,vh){vw=vw||canvas.width;vh=vh||canvas.height;const ts=this.ts,sx=Math.max(0,Math.floor(cam.x/ts)-1),ex=Math.min(this.tw-1,Math.floor((cam.x+vw)/ts)+1),sy=Math.max(0,Math.floor(cam.y/ts)-1),ey=Math.min(this.th-1,Math.floor((cam.y+vh)/ts)+1);// Foreground masonry is deliberately pushed a step warmer and lighter than the background hue.
 // That colour-temperature split — cold receding air, warm nearby stone — is the cheapest and
 // strongest depth cue there is, and it lets the playable surfaces read instantly against the murk.
 const cols={dungeon:{w:'#2b3038',w2:'#363c46',wd:'#161a1f',wl:'#4e5661',gl:'#4fd8b4',p:'#474d56'},sewers:{w:'#222c1e',w2:'#2c3826',wd:'#101809',wl:'#465238',gl:'#66c257',p:'#3b4a33'},ramparts:{w:'#3b2a1a',w2:'#4b3624',wd:'#1f1308',wl:'#6b563f',gl:'#e08a34',p:'#5d4834'},castle:{w:'#212a3a',w2:'#2b374c',wd:'#0f1520',wl:'#455471',gl:'#5aa8e6',p:'#313c56'},crypt:{w:'#292036',w2:'#352947',wd:'#150e1f',wl:'#48375f',gl:'#b264ef',p:'#3f2f57'}};const cl=cols[this.theme]||cols.dungeon;for(let ty=sy;ty<=ey;ty++)for(let tx=sx;tx<=ex;tx++){const t=this.tiles[ty]?this.tiles[ty][tx]:0;if(!t)continue;const px=tx*ts-cam.x,py=ty*ts-cam.y;if(t===1){
@@ -1519,9 +1523,12 @@ c.globalAlpha=1;}
 // ---- lichen colonies: clustered, not evenly sprinkled ----
 if(mossN>0.55){const lc=this.theme==='crypt'?'rgba(150,95,235,':this.theme==='ramparts'?'rgba(160,180,70,':this.theme==='castle'?'rgba(80,200,170,':'rgba(85,175,105,';
 const strength=U.clamp((mossN-0.55)*2.4,0,1);
-for(let k=0;k<7;k++){const mvx=px+2+NZ.h2(tx,ty,k*7+5)*(ts-4),mvy=py+2+NZ.h2(tx,ty,k*7+6)*(ts-4);
-const local=NZ.v2(mvx*0.05,mvy*0.05,53);if(local<0.45)continue;
-c.fillStyle=lc+(0.10+strength*0.16).toFixed(2)+')';c.beginPath();c.arc(mvx,mvy,1.4+strength*2.2,0,Math.PI*2);c.fill();}}
+// Noise MUST be sampled in world space. px/py are screen coordinates (tile*ts - cam), so feeding
+// them to the field would slide the pattern under the camera and make detail flicker in and out as
+// you walk. ox/oy are the tile-local offsets; the world position is the tile origin plus those.
+for(let k=0;k<7;k++){const ox=2+NZ.h2(tx,ty,k*7+5)*(ts-4),oy=2+NZ.h2(tx,ty,k*7+6)*(ts-4);
+const local=NZ.v2((tx*ts+ox)*0.05,(ty*ts+oy)*0.05,53);if(local<0.45)continue;
+c.fillStyle=lc+(0.10+strength*0.16).toFixed(2)+')';c.beginPath();c.arc(px+ox,py+oy,1.4+strength*2.2,0,Math.PI*2);c.fill();}}
 // ---- ambient occlusion in the tile's own corners, so blocks read as separate masses ----
 c.fillStyle='rgba(0,0,0,0.18)';c.fillRect(px,py+ts-8,ts,8);
 const ab=this.isSolid(tx,ty-1),be=this.isSolid(tx,ty+1),le=this.isSolid(tx-1,ty),ri=this.isSolid(tx+1,ty);
@@ -1533,8 +1540,13 @@ else if(this.theme==='castle'){c.fillStyle='rgba(230,240,250,0.85)';c.beginPath(
 else if(this.theme==='crypt'){c.fillStyle='#8a50c8';c.beginPath();c.moveTo(dx0,py);c.lineTo(dx0+2.5,py-6);c.lineTo(dx0+5,py);c.closePath();c.fill();c.fillStyle='#c8a0ff';c.beginPath();c.moveTo(dx0+1.5,py);c.lineTo(dx0+2.5,py-6);c.lineTo(dx0+3,py);c.closePath();c.fill();}
 else if(this.theme==='ramparts'){c.fillStyle='rgba(255,140,50,0.5)';c.fillRect(dx0,py-1.5,2,1.5);c.fillRect(dx0+5,py-1,1.5,1);}
 else{c.fillStyle=cl.wl;c.beginPath();c.arc(dx0+2,py-1,1.6,0,Math.PI*2);c.fill();c.beginPath();c.arc(dx0+7,py-0.8,1.1,0,Math.PI*2);c.fill();}}}if(!be){c.fillStyle=cl.wd;c.fillRect(px,py+ts-2,ts,2);}if(!le){c.fillStyle=cl.wl;c.fillRect(px,py,2,ts);}if(!ri){c.fillStyle=cl.wd;c.fillRect(px+ts-2,py,2,ts);}
-// key light from above: a soft falloff rather than a flat band, so the top face turns into the light
-{const kg=linGrad(c,'key'+this.theme,0,py,0,py+14,[[0,'rgba(255,255,255,0.085)'],[1,'rgba(255,255,255,0)']]);c.fillStyle=kg;c.fillRect(px,py,ts,14);}
+// Key light from above: a soft falloff rather than a flat band, so the top face turns into the light.
+// linGrad caches by key and bakes the coordinates it was first built with, and gradient coordinates
+// resolve against the transform in force at FILL time — so the gradient must be defined in tile-local
+// space and positioned by translating, never by passing the tile's screen y. Passing screen y pins
+// the band to one absolute position for the whole level and makes it slide across the stone as the
+// camera moves vertically.
+{c.save();c.translate(px,py);c.fillStyle=linGrad(c,'keylight',0,0,0,14,[[0,'rgba(255,255,255,0.085)'],[1,'rgba(255,255,255,0)']]);c.fillRect(0,0,ts,14);c.restore();}
 // ---- MOSS CAP on an exposed top edge, thickness driven by the moss field ----
 // Where the colony noise is strong the cap is deep and hangs over the lip; where it is weak the
 // stone stays bare. Real overgrowth is patchy like this — a uniform green fringe on every ledge is
@@ -1543,12 +1555,12 @@ if(!ab&&mossN>0.40){const mg=this.theme==='ramparts'?['#3e5018','#5f7f26','#8fb8
 const dens=U.clamp((mossN-0.40)*2.6,0,1);
 // silhouette layer: an irregular skirt whose depth follows the noise, drooping over the edge
 c.fillStyle=mg[0];c.beginPath();c.moveTo(px,py+1);
-for(let i=0;i<=8;i++){const mx2=px+i*(ts/8);const dp=1+NZ.v2(mx2*0.09,ty*0.6,53)*8*dens;c.lineTo(mx2,py+dp);}
+for(let i=0;i<=8;i++){const ox=i*(ts/8);const dp=1+NZ.v2((tx*ts+ox)*0.09,ty*0.6,53)*8*dens;c.lineTo(px+ox,py+dp);}
 c.lineTo(px+ts,py+1);c.lineTo(px+ts,py-1-3*dens);c.lineTo(px,py-1-3*dens);c.closePath();c.fill();
 // midtone clumps
-c.fillStyle=mg[1];for(let i=0;i<5;i++){const dxm=px+2+NZ.h2(tx,ty,i+13)*(ts-4);
- const l=NZ.v2(dxm*0.07,ty*0.5,53);if(l<0.42)continue;
- c.beginPath();c.ellipse(dxm,py+1+l*3,2.6+l*2,1.6+l*1.4,0,0,Math.PI*2);c.fill();}
+c.fillStyle=mg[1];for(let i=0;i<5;i++){const ox=2+NZ.h2(tx,ty,i+13)*(ts-4);
+ const l=NZ.v2((tx*ts+ox)*0.07,ty*0.5,53);if(l<0.42)continue;
+ c.beginPath();c.ellipse(px+ox,py+1+l*3,2.6+l*2,1.6+l*1.4,0,0,Math.PI*2);c.fill();}
 // rim-lit tips catching the ambient from above — this is what makes the moss read as volume
 c.fillStyle=mg[2];for(let i=0;i<4;i++){const dxm=px+3+NZ.h2(tx,ty,i+27)*(ts-6),dl=2+NZ.h2(tx,ty,i+31)*4*dens;
  c.fillRect(dxm,py-dl,1.4,dl);c.beginPath();c.arc(dxm+0.7,py-dl,1.3,0,Math.PI*2);c.fill();}
@@ -1575,8 +1587,9 @@ const dn=this.nDeck[ty*this.tw+tx],wearN=NZ.h2(tx,ty,233);
 // cast shadow dropped below the deck so it reads as floating over the void behind it
 c.fillStyle='rgba(0,0,0,0.32)';c.fillRect(px,py+9,ts,5);
 c.fillStyle='#0d0a07';c.fillRect(px,py+7,ts,2.4);
-// slab body with an across-the-depth gradient (bright lip → shadowed core)
-c.fillStyle=linGrad(c,'deck'+this.theme,0,py,0,py+8,[[0,cl.wl],[0.34,cl.p],[1,cl.wd]]);c.fillRect(px,py,ts,7.6);
+// slab body with an across-the-depth gradient (bright lip -> shadowed core), defined in tile-local
+// space and positioned by translating — see the key-light note above for why screen y is wrong here
+c.save();c.translate(px,py);c.fillStyle=linGrad(c,'deck'+this.theme,0,0,0,8,[[0,cl.wl],[0.34,cl.p],[1,cl.wd]]);c.fillRect(0,0,ts,7.6);c.restore();
 // per-slab tonal drift so a long bridge is not one flat ribbon of colour
 c.globalAlpha=Math.abs(dn-0.5)*0.55;c.fillStyle=dn>0.5?cl.w2:'#000';c.fillRect(px,py,ts,7.6);c.globalAlpha=1;
 // joints between slabs, each with a lit leading edge
@@ -1856,7 +1869,7 @@ setGameSpeed(val){TIME.set(val/100);document.getElementById('SpeedVal').textCont
 loadPerm(){const d=SaveSystem.getPerm();return{runs:d.runs||0,bonusHp:d.bonusHp||0,bonusDmg:d.bonusDmg||0,totalKills:d.totalKills||0};}
 savePerm(){SaveSystem.setPerm(this.permUpgrades);}
 
-mkP(){const perm=this.permUpgrades||{bonusHp:0,bonusDmg:0};return{x:150,y:400,w:20,h:36,vx:0,vy:0,speed:3.5,jf:-11,mhp:100+perm.bonusHp,hp:100+perm.bonusHp,facing:1,gr:false,jmp:false,jbt:0,cyt:0,dj:true,hdj:true,atk:false,at:0,ad:15,acd:0,inv:0,def:0,rl:false,rlt:0,rld:20,rlcd:0,rls:8,cw:0,wallSliding:false,maxFallSpeed:0,weapons:[{name:'Rusty Sword',type:'sword',damage:15+perm.bonusDmg,range:42,speed:14},{name:'Short Bow',type:'bow',damage:8,range:300,speed:28}],scd:0,smc:150,cells:0,gold:0,level:1,exp:0,etl:50,_wg:false,shield:0,shieldMax:0,shieldTimer:0,dodgeChance:0,hasParry:false,hasStrikeBlock:false,vampLvl:0,vampChance:0,pullOnHit:false,arrowPierce:false,rollDamageTrail:false,hasGroundPound:false,hist:[],brutality:0,tactics:0,survival:0,sqx:1,sqy:1,flasks:2,flaskMax:2,curse:0,comboStep:0,comboT:0,slam:false,atkBuf:0,rlBuf:0,hasAirRoll:false,thorns:0,adrenaline:false,magnetR:80,rally:0,rallyT:0,hpDisplay:100+perm.bonusHp,wjMax:1,wjLeft:1,wjSpin:0,hang:false,hangCd:0,climb:false,climbCd:0,slowT:0,bowFired:true,didHit:false,sneak:false,dropT:0};}
+mkP(){const perm=this.permUpgrades||{bonusHp:0,bonusDmg:0};return{x:150,y:400,w:20,h:36,vx:0,vy:0,speed:3.5,jf:-11.9,mhp:100+perm.bonusHp,hp:100+perm.bonusHp,facing:1,gr:false,jmp:false,jbt:0,cyt:0,dj:true,hdj:true,atk:false,at:0,ad:15,acd:0,inv:0,def:0,rl:false,rlt:0,rld:20,rlcd:0,rls:8,cw:0,wallSliding:false,maxFallSpeed:0,weapons:[{name:'Rusty Sword',type:'sword',damage:15+perm.bonusDmg,range:42,speed:14},{name:'Short Bow',type:'bow',damage:8,range:300,speed:28}],scd:0,smc:150,cells:0,gold:0,level:1,exp:0,etl:50,_wg:false,shield:0,shieldMax:0,shieldTimer:0,dodgeChance:0,hasParry:false,hasStrikeBlock:false,vampLvl:0,vampChance:0,pullOnHit:false,arrowPierce:false,rollDamageTrail:false,hasGroundPound:false,hist:[],brutality:0,tactics:0,survival:0,sqx:1,sqy:1,flasks:2,flaskMax:2,curse:0,comboStep:0,comboT:0,slam:false,atkBuf:0,rlBuf:0,hasAirRoll:false,thorns:0,adrenaline:false,magnetR:80,rally:0,rallyT:0,hpDisplay:100+perm.bonusHp,wjMax:1,wjLeft:1,wjSpin:0,hang:false,hangCd:0,climb:false,climbCd:0,slowT:0,bowFired:true,didHit:false,sneak:false,dropT:0};}
 
 async load(){for(let i=0;i<=100;i+=U.ri(5,15)){document.getElementById('LB').style.width=Math.min(i,100)+'%';await new Promise(r=>setTimeout(r,60));}document.getElementById('LB').style.width='100%';document.getElementById('TS').style.display='block';const s=()=>{document.getElementById('LS').classList.add('h');SFX.init();SFX.resume();this.showMainMenu();document.removeEventListener('click',s);document.removeEventListener('touchstart',s);};document.addEventListener('click',s);document.addEventListener('touchstart',s);}
 
@@ -2297,7 +2310,7 @@ const jHeld=inp.isJump();
 if(jHeld&&!p.jmp){
 // climb-up hop onto the ledge (fresh jump press)
 p.jmp=true;p.hang=false;p.hangCd=12;p.cyt=0;
-p.vy=-12.5;p.vx=p.facing*4;p.sqy=1.3;p.sqx=0.78;p.dj=p.hdj;p.wjLeft=p.wjMax;
+p.vy=-13.3;p.vx=p.facing*4;p.sqy=1.3;p.sqx=0.78;p.dj=p.hdj;p.wjLeft=p.wjMax;
 SFX.dodge();
 this.particles.emit(p.x+p.w/2,p.y+8,9,{color:'#cbb89a',size:2.5,life:14,gravity:0.08,friction:0.9,vxMin:-2,vxMax:2,vyMin:-2.5,vyMax:0});
 this.applyPP(s);return;
@@ -2324,7 +2337,11 @@ p.sneak=p.gr&&inp.isSneak()&&!p.rl&&!p.atk&&!p.climb&&!p.hang;
 // Remember ice contact briefly so a jump off ice keeps its slide momentum in the air.
 if(p.onIce)p.iceT=10;else if(p.iceT>0)p.iceT-=s;
 const slippery=p.onIce||(!p.gr&&p.iceT>0);
-const maxSpd=(slippery?p.speed*2.4:p.speed)*(p.slowT>0?0.55:1)*(p.sneak?0.5:1);
+// Airborne speed carries a small bonus. Shortening the jump by 20% would otherwise shorten how far
+// it carries you by the same 20% — horizontal reach is just speed x air time — and the level gaps
+// were authored against the longer arc. The bonus is sized to exactly restore the original reach,
+// so the jump feels faster without any gap becoming harder to clear.
+const maxSpd=(slippery?p.speed*2.4:p.speed)*(p.slowT>0?0.55:1)*(p.sneak?0.5:1)*(p.gr?1:1.07);
 // ---- GROUND / AIR LOCOMOTION ----
 // Momentum is what makes a body feel like it has mass. Rather than snapping to a target velocity,
 // the character accelerates toward it at a rate that depends on the surface and on whether you are
@@ -2350,7 +2367,7 @@ if(p.cyt<=0&&!p.gr&&p.wjLeft>0&&!p.onMoss){const chkW=(dir)=>{const ex=dir>0?p.x
 if(p.cyt>0){p.vy=p.jf;p.cyt=0;p.jbt=0;p.gr=false;p.sqy=1.3;p.sqx=0.78;if(p.iceT>0)p.iceT=42;/*carry ice momentum through the whole jump*/this.particles.emit(p.x+p.w/2,p.y+p.h,7,{color:'#8a8a70',size:2.5,life:12,gravity:0.05,friction:0.92,vxMin:-2.5,vxMax:2.5,vyMin:-0.6,vyMax:0.4});}
 else if(wallDir!==0){
 // WALL KICK — one powerful rebound (upgradeable), with a flip
-p.vy=-12.5;p.vx=-wallDir*7.5;p.facing=-wallDir;p.wjLeft--;p.wjSpin=16;p.jbt=0;p.gr=false;p.dj=p.hdj;p.sqy=1.28;p.sqx=0.8;
+p.vy=-13.3;p.vx=-wallDir*7.5;p.facing=-wallDir;p.wjLeft--;p.wjSpin=16;p.jbt=0;p.gr=false;p.dj=p.hdj;p.sqy=1.28;p.sqx=0.8;
 const wx2=wallDir>0?p.x+p.w:p.x;
 this.particles.emit(wx2,p.y+p.h*0.5,12,{color:'#cfe8ff',size:2.5,life:16,glow:true,gravity:0.03,friction:0.9,vxMin:-wallDir*5,vxMax:-wallDir*1,vyMin:-3,vyMax:3});
 this.particles.emit(wx2,p.y+p.h*0.5,5,{color:'#8a8a70',size:3,life:14,gravity:0.1,vxMin:-wallDir*3,vxMax:0,vyMin:-2,vyMax:1});
@@ -2382,7 +2399,7 @@ if(_sword){
   p.acd=Math.round(p.ad*(p.comboStep===COMBO.length-1?1.55:0.42));  // long recovery only after the finisher
   p.comboT=Math.round(p.ad*2.6);
   // the step-in: each beat carries the body forward, the finisher also hops off the ground
-  if(p.gr){p.vx+=p.facing*cd.lunge;if(cd.shape==='ring')p.vy=-4.2;}
+  if(p.gr){p.vx+=p.facing*cd.lunge;if(cd.shape==='ring')p.vy=-4.5;}
   else p.vx+=p.facing*cd.lunge*0.45;
   p.sqx=1+0.06*p.comboStep;p.sqy=2-p.sqx;
   SFX.swordSwing();
@@ -2400,9 +2417,13 @@ if(inp.isSkill()&&p.scd<=0){p.scd=p.smc;if(!p.gr){p.vy=15;}else{for(let i=-3;i<=
 // near the apex so there is a beat of hang time to read the landing, and stiffened once you are
 // committed to falling so the descent has weight. Holding DOWN adds a deliberate fast-fall.
 // The apex softening adds only ~4% to jump height, so every existing gap stays exactly as clearable.
-{const rising=p.vy<0,apexHang=!p.gr&&Math.abs(p.vy)<2.6;
-let grav=0.55;
-if(apexHang)grav*=0.55;else if(!rising)grav*=1.26;
+// Tuned so the whole airborne phase is 20% shorter than it was: stiffer base gravity, a much
+// gentler apex softening (0.90 rather than 0.55) over a narrower velocity window, with the jump
+// impulse raised to -11.9 so peak height still comes out ABOVE the original 104.5px — a shorter,
+// snappier arc that reaches at least as high, so no jump that used to clear something now fails.
+{const rising=p.vy<0,apexHang=!p.gr&&Math.abs(p.vy)<2.0;
+let grav=0.625;
+if(apexHang)grav*=0.90;else if(!rising)grav*=1.24;
 if(!rising&&inp.isDown()&&!p.hang&&!p.climb&&!p.wallSliding)grav*=1.5;
 if(p.wallSliding)grav*=0.5;
 p.vy+=grav*s;}
@@ -2625,7 +2646,9 @@ c.restore();
 drawVegetation(c,cam,vw,vh){const w=this.world,ts=w.ts,t=Date.now();
 // [silhouette, body, rim, bloom]
 const veg={dungeon:['#173a1e','#2f6f37','#5ba85a','#a0ff90'],sewers:['#1a4a1c','#337f33','#6fd06f','#c8ff70'],ramparts:['#33401a','#5f7326','#9aba44','#ffcf5a'],castle:['#153e30','#2a6f55','#4fb090','#7fffe0'],crypt:['#281c4c','#463079','#8060d0','#e070ff']}[w.theme]||['#173a1e','#2f6f37','#5ba85a','#a0ff90'];
-const sx0=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(w.tw-1,Math.floor((cam.x+vw)/ts)+1),sy0=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
+// Same margin as the tile pass, and for the same reason: grass grows upward out of its tile and
+// vines hang downward out of theirs, so both need a row of off-screen tiles to be considered.
+const sx0=Math.max(0,Math.floor(cam.x/ts)-1),ex=Math.min(w.tw-1,Math.floor((cam.x+vw)/ts)+1),sy0=Math.max(0,Math.floor(cam.y/ts)-1),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
 for(let ty=sy0;ty<=ey;ty++)for(let tx=sx0;tx<=ex;tx++){const tt=w.tiles[ty]&&w.tiles[ty][tx];if(tt!==1&&tt!==2)continue;
 const px=tx*ts-cam.x,py=ty*ts-cam.y;
 // ---- the growth field: how hospitable this spot is, 0..1, varying smoothly over the map ----
@@ -2649,7 +2672,8 @@ if(topOpen){
  const cnt=2+Math.round(dens*5);
  // pass 1 — dark silhouette mass hugging the stone, the "shadow root" of the clump
  c.fillStyle=veg[0];c.beginPath();c.moveTo(px,py+1);
- for(let i=0;i<=6;i++){const gx=px+i*(ts/6);c.lineTo(gx,py-1-NZ.v2(gx*0.14,ty,53)*5*dens);}
+ // sampled at the tile's WORLD x, never at px (which is screen-relative and slides with the camera)
+ for(let i=0;i<=6;i++){const ox=i*(ts/6);c.lineTo(px+ox,py-1-NZ.v2((tx*ts+ox)*0.14,ty,53)*5*dens);}
  c.lineTo(px+ts,py+1);c.closePath();c.fill();
  // pass 2 — blades. Each is a tapered wedge, not a stroke, so it has a thick base and a fine tip,
  // and each sways on its own phase so the clump breathes instead of waving as one rigid unit.
@@ -2679,9 +2703,10 @@ if((tt===2||botOpen)&&maxHang>6){
  const voy=(tt===2?py+7:py+ts-2);
  const strands=1+Math.round(dens*2.4);
  for(let sI=0;sI<strands;sI++){
-  const vx=px+3+rnd(sI*5+40)*(ts-6);
-  // stems hang longer where the field is rich, and each has its own species pulled from the field
-  const species=Math.floor(NZ.v2(vx*0.05,ty*0.3,91)*4);
+  const vox=3+rnd(sI*5+40)*(ts-6),vx=px+vox;
+  // stems hang longer where the field is rich, and each has its own species pulled from the field —
+  // sampled at the strand's WORLD x so a strand keeps its species as the camera pans
+  const species=Math.floor(NZ.v2((tx*ts+vox)*0.05,ty*0.3,91)*4);
   const len=Math.min(maxHang,(9+rnd(sI*5+41)*20)*(0.5+dens*0.9));
   const sway=Math.sin(t/760+tx*0.5+sI*2.1)*(2.4+dens*3.2);
   // dark stem first, so the leaves that follow read as sitting in front of it
