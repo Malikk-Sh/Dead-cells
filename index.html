@@ -326,6 +326,12 @@ s.start();
 env(fA,fB,dur,type,vol,o={}){if(!this.initialized)return;vol*=(this._posGain||1);if(vol<0.0008)return;const t=this.ctx.currentTime;const osc=this.ctx.createOscillator();osc.type=type;osc.frequency.setValueAtTime(fA,t);if(fB&&fB!==fA)osc.frequency.exponentialRampToValueAtTime(Math.max(1,fB),t+dur);if(o.detune)osc.detune.value=o.detune;const g=this.ctx.createGain();const atk=o.atk!==undefined?o.atk:0.004;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+atk);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);let node=osc;if(o.filter){const f=this.ctx.createBiquadFilter();f.type=o.filter;f.frequency.value=o.ff||1200;if(o.fq)f.Q.value=o.fq;osc.connect(f);node=f;}node.connect(g);g.connect(this.sfxGain);osc.start(t);osc.stop(t+dur+0.02);},
 // noise burst with a filter sweep
 noise2(dur,vol,o={}){if(!this.initialized)return;vol*=(this._posGain||1);if(vol<0.0008)return;const t=this.ctx.currentTime;const buf=this.ctx.createBuffer(1,Math.max(1,this.ctx.sampleRate*dur),this.ctx.sampleRate);const d=buf.getChannelData(0);let lp=0;const rough=o.rough||0;for(let i=0;i<d.length;i++){let n=(Math.random()*2-1);if(rough){lp=lp*rough+n*(1-rough);n=lp;}d[i]=n;}const s=this.ctx.createBufferSource();s.buffer=buf;const f=this.ctx.createBiquadFilter();f.type=o.filter||'highpass';f.frequency.setValueAtTime(o.ff||2000,t);if(o.ffEnd)f.frequency.exponentialRampToValueAtTime(Math.max(60,o.ffEnd),t+dur);if(o.fq)f.Q.value=o.fq;const g=this.ctx.createGain();const atk=o.atk!==undefined?o.atk:0.0015;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+atk);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);s.connect(f);f.connect(g);g.connect(this.sfxGain);s.start(t);},
+// Deferred layer that keeps the spatial gain of the moment it was scheduled. Plain setTimeout
+// loses it — _posGain is back to 1 by the time the callback runs — so every delayed layer used to
+// play at full volume regardless of distance, and a chest across the map delivered a quiet creak
+// followed by a chime at point-blank level. Anything scheduled must go through this.
+later(ms,fn){const g=this._posGain||1;setTimeout(()=>{const prev=this._posGain;this._posGain=g;try{fn();}finally{this._posGain=prev;}},ms);},
+
 hit(){this.noise2(0.05,0.15,{filter:'bandpass',ff:2400,ffEnd:1000,fq:1.4});this.env(200,120,0.08,'sine',0.14,{atk:0.001});},
 // air whoosh: a rising then falling band of noise (two layers = fuller swoosh)
 swordSwing(){this.noise2(0.17,0.16,{filter:'bandpass',ff:640,ffEnd:2500,fq:0.8,atk:0.02});this.noise2(0.13,0.09,{filter:'bandpass',ff:2000,ffEnd:520,fq:1.3,atk:0.01});},
@@ -373,27 +379,153 @@ ns.connect(bp);bp.connect(ng);ng.connect(this.sfxGain);
 ns.start(t+0.02);
 },
 
-pickup(){this.env(680,680,0.06,'sine',0.09,{atk:0.003});setTimeout(()=>this.env(1020,1020,0.09,'sine',0.08),40);},
-goldPickup(){this.env(1180,1180,0.05,'triangle',0.08);setTimeout(()=>this.env(1560,1560,0.06,'sine',0.07),45);setTimeout(()=>this.env(1980,1980,0.05,'sine',0.04),90);},
-healthPickup(){this.env(392,392,0.12,'sine',0.09,{atk:0.006});this.env(523,523,0.14,'sine',0.07,{atk:0.008});setTimeout(()=>this.env(659,659,0.16,'sine',0.06,{atk:0.01}),60);},
+pickup(){this.env(680,680,0.06,'sine',0.09,{atk:0.003});this.later(40,()=>this.env(1020,1020,0.09,'sine',0.08));},
+// A coin is a small metal disc: inharmonic partials, a very fast decay, and a second, quieter
+// bounce a moment later. The old ascending pure-sine arpeggio read as a UI blip, not as money.
+goldPickup(){
+  this.noise2(0.02,0.09,{filter:'bandpass',ff:6000,fq:3});
+  this.env(1860,1840,0.13,'triangle',0.070,{atk:0.001});
+  this.env(2740,2700,0.10,'sine',0.045,{atk:0.001});
+  this.env(4130,4050,0.07,'sine',0.024,{atk:0.001});
+  this.later(88,()=>{this.env(1980,1950,0.07,'triangle',0.034,{atk:0.001});this.env(2900,2860,0.05,'sine',0.019,{atk:0.001});});
+},
+healthPickup(){this.env(392,392,0.12,'sine',0.09,{atk:0.006});this.env(523,523,0.14,'sine',0.07,{atk:0.008});this.later(60,()=>this.env(659,659,0.16,'sine',0.06,{atk:0.01}));},
 playerHit(){this.noise2(0.14,0.24,{filter:'lowpass',ff:1300,ffEnd:320,rough:0.25});this.env(175,68,0.16,'sawtooth',0.24,{atk:0.001});this.env(300,150,0.11,'triangle',0.1);},
 enemyDie(){this.noise2(0.17,0.17,{filter:'lowpass',ff:1500,ffEnd:280,rough:0.35});this.env(235,72,0.16,'sawtooth',0.12,{atk:0.002});this.env(135,52,0.2,'sine',0.1);},
 explosion(){this.noise2(0.36,0.42,{filter:'lowpass',ff:1300,ffEnd:100,rough:0.2});this.env(85,34,0.36,'sawtooth',0.3,{atk:0.002});this.env(150,48,0.2,'square',0.18);},
 impact(){this.noise2(0.2,0.34,{filter:'lowpass',ff:820,ffEnd:130,rough:0.3});this.env(100,44,0.26,'sine',0.3,{atk:0.001});this.env(150,58,0.13,'square',0.14);},
 parry(){this.noise2(0.04,0.18,{filter:'bandpass',ff:4200,fq:3});this.env(1400,1400,0.09,'sine',0.2,{atk:0.001});this.env(2100,2100,0.14,'sine',0.12);this.env(2800,2600,0.12,'triangle',0.06);},
-levelUp(){const sc=[392,523,659,784,1046];sc.forEach((f,i)=>setTimeout(()=>{this.env(f,f,0.16,'sine',0.13,{atk:0.006});this.env(f*2,f*2,0.14,'triangle',0.04);},i*70));},
+levelUp(){const sc=[392,523,659,784,1046];sc.forEach((f,i)=>this.later(i*70,()=>{this.env(f,f,0.16,'sine',0.13,{atk:0.006});this.env(f*2,f*2,0.14,'triangle',0.04);}));},
 dodge(){this.noise2(0.16,0.15,{filter:'bandpass',ff:560,ffEnd:2300,fq:0.8,atk:0.012});this.env(240,520,0.1,'sine',0.05);},
+
+// ---- WALL KICK ----
+// The old cue was a 340Hz square-wave beep plus white noise: a chiptune artefact, not a sound a
+// body makes, and the one square wave in the whole mix — which is exactly why it stuck out.
+// A boot planting on stone and shoving off is three events inside ~150ms, and layering them with
+// no tonal oscillator anywhere near the transient is what makes it read as physical:
+//   1. sole grit scraping rock — rough mid-band noise, in and out fast
+//   2. the body's mass arriving — a low sine with a quick pitch drop, felt more than heard
+//   3. the push-off — air moving, delayed slightly so it reads as a consequence of the plant
+// A little loose grit falls afterwards to give the event a tail instead of a hard stop.
+wallKick(){
+  this.noise2(0.085,0.26,{filter:'bandpass',ff:1750,ffEnd:520,fq:0.9,rough:0.42,atk:0.001});
+  this.env(148,62,0.11,'sine',0.20,{atk:0.001});
+  // dry knock for a defined contact edge — triangle, not square: far fewer odd harmonics, so it
+  // reads as a thud against stone rather than as a tone
+  this.env(320,190,0.045,'triangle',0.085,{atk:0.0008});
+  this.later(38,()=>this.noise2(0.13,0.11,{filter:'bandpass',ff:480,ffEnd:1900,fq:0.7,atk:0.02}));
+  this.later(75,()=>this.noise2(0.055,0.05,{filter:'highpass',ff:5200,rough:0.1}));
+},
+// continuous friction while sliding down a wall — ticked periodically like footsteps
+wallScrape(){this.noise2(0.11,0.095,{filter:'bandpass',ff:2600,ffEnd:1400,fq:1.1,rough:0.32,atk:0.025});},
+// ---- ENEMY WIND-UP ----
+// The tell for an incoming melee swing. It has to be noticeable without being musical, because it
+// fires constantly in a crowd: a short cloth-and-leather rustle over a low body shift. The square
+// beep this replaces was pitched, so a group of enemies winding up played as a chord.
+enemyWindup(){
+  this.noise2(0.10,0.085,{filter:'bandpass',ff:900,ffEnd:2200,fq:1.0,rough:0.5,atk:0.03});
+  this.env(112,86,0.09,'sine',0.055,{atk:0.012});
+},
+// wet, gloopy launch for the spitter — a low burble under a splat of dark noise
+spit(){
+  this.noise2(0.10,0.13,{filter:'lowpass',ff:1500,ffEnd:400,rough:0.45,atk:0.004});
+  this.env(300,110,0.11,'sine',0.11,{atk:0.006});
+  this.env(150,70,0.09,'triangle',0.05,{atk:0.004});
+},
+// arcane cast: a detuned pair rising into a bright shimmer, with air behind it
+castOrb(){
+  this.env(430,760,0.20,'triangle',0.10,{atk:0.010});
+  this.env(430,760,0.20,'sine',0.06,{atk:0.010,detune:19});
+  this.env(1290,1720,0.16,'sine',0.035,{atk:0.020});
+  this.noise2(0.22,0.055,{filter:'bandpass',ff:1400,ffEnd:4200,fq:1.4,atk:0.03});
+},
+// a wisp arming itself: a rising whine that resolves into the explosion — unmistakably a fuse
+wispFuse(){
+  this.env(620,1500,0.34,'triangle',0.11,{atk:0.02});
+  this.env(930,2250,0.30,'sine',0.05,{atk:0.03,detune:-14});
+  this.noise2(0.34,0.05,{filter:'bandpass',ff:2200,ffEnd:5200,fq:2,atk:0.06});
+},
+// ---- LANDING ----
+// Landing had no sound at all unless it was a slam, so ordinary drops resolved in silence. Weight
+// scales with fall distance: a hop is a soft scuff, a long drop is a heavy thud that kicks up grit.
+// f is clamped through a numeric coercion first: a NaN or undefined strength would propagate
+// through every gain and duration below and render the cue silently rather than loudly wrong,
+// which is the kind of failure that never gets noticed.
+land(f){const n=+f;const s=!(n>0)?0:n>1?1:n;
+  this.noise2(0.06+s*0.07,0.055+s*0.15,{filter:'lowpass',ff:820-s*280,ffEnd:170,rough:0.4});
+  this.env(142-s*46,58-s*16,0.07+s*0.09,'sine',0.055+s*0.15,{atk:0.001});
+  if(s>0.55)this.later(20,()=>this.noise2(0.10,0.05*s,{filter:'highpass',ff:4400,rough:0.1}));
+},
 footfall(){this.noise2(0.04,0.06,{filter:'lowpass',ff:700,ffEnd:300});this.env(120,80,0.05,'sine',0.05);},
-block(){this.playTone(300,0.06,'square',0.2);this.playNoise(0.04,0.1);},
-portal(){this.playTone(400,0.2,'sine',0.15);this.playTone(600,0.25,'sine',0.12);this.playTone(800,0.2,'sine',0.1);},
-die(){this.playTone(200,0.3,'sawtooth',0.3);this.playTone(100,0.5,'square',0.2);this.playNoise(0.3,0.2);},
+// ---- SHIELD BLOCK ----
+// Struck metal does not ring at a musical pitch: its partials sit at non-integer ratios, which is
+// precisely why a single square tone read as a UI beep. A hard noise transient carries the impact,
+// a low sine carries the shield body behind it, and three inharmonic partials do the ringing.
+block(){
+  this.noise2(0.035,0.20,{filter:'bandpass',ff:3200,ffEnd:1400,fq:1.6,atk:0.0008});
+  this.env(196,150,0.09,'sine',0.15,{atk:0.001});
+  this.env(1180,1120,0.16,'triangle',0.050,{atk:0.001});
+  this.env(1790,1700,0.13,'triangle',0.034,{atk:0.001});
+  this.env(2630,2500,0.10,'sine',0.021,{atk:0.001});
+},
+// ---- PORTAL ----
+// Two sweeps a few cents apart beat against each other as they rise, which is what gives a portal
+// its shimmer; three flat sine tones just sounded like a menu confirmation.
+portal(){
+  this.env(220,880,0.70,'sine',0.10,{atk:0.06});
+  this.env(220,880,0.70,'sine',0.08,{atk:0.06,detune:14});
+  this.env(330,1320,0.60,'triangle',0.05,{atk:0.09,detune:-9});
+  this.noise2(0.75,0.07,{filter:'bandpass',ff:700,ffEnd:4200,fq:1.2,atk:0.12});
+  this.later(250,()=>this.env(1320,1320,0.42,'sine',0.05,{atk:0.02}));
+},
+// ---- DEATH ----
+// A long collapsing sub under a filtered noise fall, then a scatter of dry clatters at irregular
+// intervals — evenly spaced ticks would read as mechanical rather than as a body coming apart.
+die(){
+  this.env(180,28,0.90,'sawtooth',0.26,{atk:0.004,filter:'lowpass',ff:1100});
+  this.env(90,22,1.20,'sine',0.22,{atk:0.010});
+  this.noise2(0.50,0.18,{filter:'lowpass',ff:1600,ffEnd:180,rough:0.35});
+  for(let i=0;i<4;i++)this.later(130+i*95+Math.random()*55,()=>this.noise2(0.05,0.07,{filter:'bandpass',ff:900+Math.random()*900,fq:3,rough:0.2}));
+},
 footstep(){this.noise2(0.05,0.055,{filter:'lowpass',ff:620,ffEnd:220,rough:0.4});this.env(100,62,0.045,'sine',0.045,{atk:0.001});},
-flaskDrink(){this.playTone(300,0.08,'sine',0.12);setTimeout(()=>this.playTone(400,0.08,'sine',0.12),80);setTimeout(()=>this.playTone(520,0.12,'sine',0.14),160);},
-chestOpen(){this.playTone(180,0.15,'triangle',0.15);setTimeout(()=>{this.playTone(660,0.1,'sine',0.12);this.playTone(880,0.14,'sine',0.1);},120);},
-doorBreak(){this.playNoise(0.2,0.3,300);this.playTone(90,0.15,'square',0.2);},
+// ---- FLASK ----
+// Glass tick, then three glugs whose resonance FALLS as the bottle empties. That falling pitch is
+// the whole tell that something is being drunk; the old ascending beeps read as a power-up jingle.
+flaskDrink(){
+  this.noise2(0.03,0.10,{filter:'bandpass',ff:3600,fq:4});
+  const glug=(i)=>{const f=430-i*58;this.env(f,f*0.55,0.075,'sine',0.13,{atk:0.004});
+    this.noise2(0.05,0.05,{filter:'lowpass',ff:900,ffEnd:300,rough:0.5});};
+  glug(0);this.later(115,()=>glug(1));this.later(225,()=>glug(2));
+  this.later(345,()=>this.env(660,880,0.22,'sine',0.06,{atk:0.02}));
+},
+// ---- CHEST ----
+// Latch, hinge, reward — in that order and with real gaps between them, so it plays as a sequence
+// of mechanical events. A creak is a narrow resonant band drifting upward under a slow attack.
+chestOpen(){
+  this.noise2(0.04,0.12,{filter:'bandpass',ff:2600,fq:3});
+  this.env(150,132,0.06,'triangle',0.10,{atk:0.002});
+  this.later(65,()=>this.noise2(0.34,0.09,{filter:'bandpass',ff:420,ffEnd:1150,fq:7,rough:0.55,atk:0.05}));
+  this.later(310,()=>{this.env(784,784,0.30,'sine',0.11,{atk:0.008});this.env(1176,1176,0.26,'triangle',0.05,{atk:0.010});this.env(1568,1568,0.34,'sine',0.04,{atk:0.012});});
+},
+// ---- DOOR BREAK ----
+// Timber fails along its grain in a burst of separate cracks, never all at once, so the cracks are
+// scattered at jittered delays over a low body thud. Regular spacing would sound like gunfire.
+doorBreak(){
+  this.noise2(0.26,0.30,{filter:'lowpass',ff:900,ffEnd:120,rough:0.28});
+  this.env(96,40,0.24,'sine',0.26,{atk:0.002});
+  for(let i=0;i<5;i++)this.later(10+i*38+Math.random()*28,()=>this.noise2(0.045,0.13,{filter:'bandpass',ff:1500+Math.random()*2200,fq:2.4,rough:0.15}));
+  this.later(130,()=>this.noise2(0.30,0.08,{filter:'lowpass',ff:1400,ffEnd:400,rough:0.5}));
+},
 bossRoar(){if(!this.initialized)return;const t=this.ctx.currentTime;const o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type='sawtooth';o.frequency.setValueAtTime(110,t);o.frequency.exponentialRampToValueAtTime(38,t+0.7);g.gain.setValueAtTime(0.32,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.8);o.connect(g);g.connect(this.sfxGain);o.start(t);o.stop(t+0.8);this.playNoise(0.5,0.2,200);},
-curseSfx(){this.playTone(320,0.3,'sawtooth',0.15);setTimeout(()=>this.playTone(240,0.3,'sawtooth',0.15),140);setTimeout(()=>this.playTone(160,0.5,'sawtooth',0.18),300);},
-victory(){[523,659,784,1046].forEach((f,i)=>setTimeout(()=>this.playTone(f,0.25,'sine',0.2),i*140));},
+// A slow dissonant swell — a tritone pair beating against a sub, filtered dark. Dread comes from
+// two pitches refusing to resolve against each other, which three sequential beeps cannot do.
+curseSfx(){
+  this.env(150,110,0.90,'sawtooth',0.13,{atk:0.18,filter:'lowpass',ff:900});
+  this.env(212,158,0.90,'sawtooth',0.10,{atk:0.22,detune:-22,filter:'lowpass',ff:800});
+  this.env(75,55,1.10,'sine',0.16,{atk:0.15});
+  this.noise2(0.90,0.07,{filter:'bandpass',ff:1800,ffEnd:300,fq:0.8,atk:0.25,rough:0.3});
+},
+victory(){[523,659,784,1046].forEach((f,i)=>this.later(i*140,()=>{this.env(f,f,0.30,'triangle',0.13,{atk:0.006});this.env(f*2,f*2,0.26,'sine',0.055,{atk:0.010});this.env(f*0.5,f*0.5,0.34,'sine',0.05,{atk:0.012});}));},
 
 startAmbient(){if(!this.initialized||this.ambient)return;this.ambient=true;this._ambLoop();},
 stopAmbient(){this.ambient=false;if(this._ambTimeout){clearTimeout(this._ambTimeout);this._ambTimeout=null;}},
@@ -936,7 +1068,7 @@ if(this.buffer){this.updateBuffer(world,player,game,see,dx,dy,dist,ecx,ecy,s);
 }else if(this.flying){
 if(this.wisp){
 if(this.fusing){this.fuseT-=s;this.vx*=Math.pow(.9,s);this.vy*=Math.pow(.9,s);if(game.fr%3===0)game.particles.emit(this.x+this.w/2,this.y+this.h/2,1,{color:'#c09fff',size:2,life:10,glow:true,gravity:0,vxMin:-1.5,vxMax:1.5,vyMin:-1.5,vyMax:1.5});if(this.fuseT<=0){this.explodeWisp(game,player);return;}}
-else if(see){this.ai.saw=true;const angw=Math.atan2(dy,dx);this.vx=U.lerp(this.vx,Math.cos(angw)*this.spd,.08);this.vy=U.lerp(this.vy,Math.sin(angw)*this.spd,.08);if(dist<40){this.fusing=true;this.fuseT=38;SFX.playTone(920,0.1,'sine',0.16);}}
+else if(see){this.ai.saw=true;const angw=Math.atan2(dy,dx);this.vx=U.lerp(this.vx,Math.cos(angw)*this.spd,.08);this.vy=U.lerp(this.vy,Math.sin(angw)*this.spd,.08);if(dist<40){this.fusing=true;this.fuseT=38;SFX.wispFuse();}}
 else{this.vx=Math.sin(Date.now()/700+this.x)*.5;this.vy=Math.cos(Date.now()/600+this.y)*.4;}
 }else{
 if(see){this.ai.saw=true;if(!this.isDiving&&dist<150&&U.ch(0.015*s)){this.isDiving=true;this.diveTimer=35;}
@@ -957,7 +1089,7 @@ this.vy+=.5*s;this.physGround(world,s,game);
 }else if(this.spitter){
 if(see){this.ai.saw=true;this.facing=Math.sign(dx)||1;
 if(dist<90)this.vx=U.lerp(this.vx,-Math.sign(dx)*this.spd,.08);else if(dist>240)this.vx=U.lerp(this.vx,Math.sign(dx)*this.spd*.5,.08);else this.vx*=.9;
-if(this.shootCd<=0&&dist<310){this.shootCd=110+U.ri(0,40);const tt=Math.max(22,dist/5);const gvx=dx/tt,gvy=dy/tt-0.5*0.22*tt;game.globs.push(new Glob(ecx,ecy-6,gvx,U.clamp(gvy,-9,3),this.dmg));SFX.playTone(220,0.12,'sine',0.14);game.particles.emit(ecx+this.facing*8,ecy-8,4,{color:'#8fe040',size:2.5,life:12,glow:true,gravity:0,vxMin:this.facing*1,vxMax:this.facing*3,vyMin:-1,vyMax:1});}
+if(this.shootCd<=0&&dist<310){this.shootCd=110+U.ri(0,40);const tt=Math.max(22,dist/5);const gvx=dx/tt,gvy=dy/tt-0.5*0.22*tt;game.globs.push(new Glob(ecx,ecy-6,gvx,U.clamp(gvy,-9,3),this.dmg));SFX.spit();game.particles.emit(ecx+this.facing*8,ecy-8,4,{color:'#8fe040',size:2.5,life:12,glow:true,gravity:0,vxMin:this.facing*1,vxMax:this.facing*3,vyMin:-1,vyMax:1});}
 }else{if(this.ai.timer<=0){this.ai.dir*=-1;this.ai.timer=U.ri(60,180);}this.vx=this.ai.dir*this.spd*.3;this.facing=this.ai.dir;}
 this.vy+=.5*s;this.physGround(world,s,game);
 }else if(this.shielder){this.updateShield(world,player,game,see,dx,dy,dist,s);
@@ -982,7 +1114,7 @@ else if(this.swingT>0){
   if(this.swingT<=0)this.ac=this.buffed>0?46:74;
 }
 else if(dist>40){this.vx=U.app(this.vx,Math.sign(dx)*this.spd,0.12,s);}
-else if(this.ac<=0){this.swingMax=this.buffed>0?20:26;this.swingT=this.swingMax;this.swingHit=false;this.facing=Math.sign(dx)||this.facing;SFX.playTone(150,0.06,'square',0.05);}
+else if(this.ac<=0){this.swingMax=this.buffed>0?20:26;this.swingT=this.swingMax;this.swingHit=false;this.facing=Math.sign(dx)||this.facing;SFX.enemyWindup();}
 // chase downward: drop through a one-way platform we're standing on to follow the player below
 if(dy>44&&this.gr&&this.dropT<=0){const bx=Math.floor((this.x+this.w/2)/32),by=Math.floor((this.y+this.h+2)/32);if(world.tiles[by]&&world.tiles[by][bx]===2){this.dropT=8;this.vy=Math.max(this.vy,1.5);}}
 // small hop up toward a player who is above us
@@ -1071,7 +1203,7 @@ if(!bad&&!hasLOS(world,nx+this.w/2,ny+this.h/2,pcx,pcy))bad=true;
 if(!bad){this.x=nx;this.y=ny;this.vx=0;this.vy=0;break;}}
 SFX.portal();game.particles.emit(this.x+this.w/2,this.y+this.h/2,18,{color:'#e0a0ff',size:4,life:22,glow:true,vxMin:-4,vxMax:4,vyMin:-4,vyMax:4});
 }
-fireOrb(game,pcx,pcy,ecx,ecy){const ang=Math.atan2(pcy-ecy,pcx-ecx),sp=2.3;game.orbs.push(new Orb(ecx,ecy,Math.cos(ang)*sp,Math.sin(ang)*sp,this.dmg,'enemy'));SFX.playTone(520,0.16,'sine',0.14);SFX.playTone(720,0.12,'triangle',0.1);game.particles.emit(ecx,ecy,8,{color:'#c060ff',size:3,life:16,glow:true,vxMin:-2,vxMax:2,vyMin:-2,vyMax:2});}
+fireOrb(game,pcx,pcy,ecx,ecy){const ang=Math.atan2(pcy-ecy,pcx-ecx),sp=2.3;game.orbs.push(new Orb(ecx,ecy,Math.cos(ang)*sp,Math.sin(ang)*sp,this.dmg,'enemy'));SFX.castOrb();SFX.playTone(720,0.12,'triangle',0.1);game.particles.emit(ecx,ecy,8,{color:'#c060ff',size:3,life:16,glow:true,vxMin:-2,vxMax:2,vyMin:-2,vyMax:2});}
 updateShield(world,player,game,see,dx,dy,dist,s){
 if(this.bashCd>0)this.bashCd-=s;if(this.turnCd===undefined)this.turnCd=0;
 switch(this.bashPhase){
@@ -1146,7 +1278,7 @@ if(this.eliteDashTimer<=0){this.rPhase='idle';this.rCd=70+U.ri(0,30);}break;
 case'castWind':this.vx*=Math.pow(.8,s);this.windupTimer-=s;
 if(game.fr%4===0)game.particles.emit(this.x+this.w/2,this.y+4,1,{color:'#6fff9f',size:2.5,life:12,glow:true,gravity:0,vxMin:-.5,vxMax:.5,vyMin:-.8,vyMax:0});
 if(this.windupTimer<=0){this.isWindingUp=false;this.rPhase='idle';this.rCd=90+U.ri(0,30);const cx=this.x+this.w/2,cy=this.y+10;const base=Math.atan2(player.y+player.h/2-cy,player.x+player.w/2-cx);
-for(let k=-1;k<=1;k++){const a=base+k*0.35;game.orbs.push(new Orb(cx,cy,Math.cos(a)*2.4,Math.sin(a)*2.4,Math.ceil(this.dmg*0.7),'enemy'));}SFX.playTone(520,0.15,'sine',0.14);}break;
+for(let k=-1;k<=1;k++){const a=base+k*0.35;game.orbs.push(new Orb(cx,cy,Math.cos(a)*2.4,Math.sin(a)*2.4,Math.ceil(this.dmg*0.7),'enemy'));}SFX.castOrb();}break;
 }
 this.vy+=.5*s;this.physGround(world,s,game);
 }
@@ -2371,7 +2503,7 @@ p.vy=-13.3;p.vx=-wallDir*7.5;p.facing=-wallDir;p.wjLeft--;p.wjSpin=16;p.jbt=0;p.
 const wx2=wallDir>0?p.x+p.w:p.x;
 this.particles.emit(wx2,p.y+p.h*0.5,12,{color:'#cfe8ff',size:2.5,life:16,glow:true,gravity:0.03,friction:0.9,vxMin:-wallDir*5,vxMax:-wallDir*1,vyMin:-3,vyMax:3});
 this.particles.emit(wx2,p.y+p.h*0.5,5,{color:'#8a8a70',size:3,life:14,gravity:0.1,vxMin:-wallDir*3,vxMax:0,vyMin:-2,vyMax:1});
-SFX.playTone(340,0.07,'square',0.16);SFX.playNoise(0.05,0.1,1600);this.shake.trigger(2,3);}
+SFX.wallKick();this.shake.trigger(2,3);}
 else if(p.dj){p.vy=p.jf*.85;p.dj=false;p.jbt=0;p.gr=false;p.sqy=1.3;p.sqx=0.78;this.particles.emit(p.x+p.w/2,p.y+p.h/2,10,{color:'#0fd',size:2,life:16,glow:true,gravity:0,friction:0.9,vxMin:-3.5,vxMax:3.5,vyMin:-1,vyMax:2.5});}
 }
 if(!inp.isJump()&&p.vy<-2)p.vy*=.85;
@@ -2430,7 +2562,7 @@ p.vy+=grav*s;}
 p.vy=U.clamp(p.vy,-15,15);p.wallSliding=false;p.onMoss=false;
 // Check moss walls — disable wall-slide and wall-jump if touching
 for(const m of this.mossWalls){if(U.rc({x:p.x-4,y:p.y,w:p.w+8,h:p.h},{x:m.x,y:m.y,w:m.w,h:m.h})){p.onMoss=true;break;}}
-if(!p.gr&&p.vy>0){const wt=this.world.getTilesAround(p.x+p.facing*2,p.y,p.w,p.h);let tw=false;for(const t of wt)if(t.type===1&&U.rc({x:p.x+(p.facing===1?p.w:-4),y:p.y,w:4,h:p.h},t)){tw=true;break;}if(tw&&Math.abs(mx)>.3&&!p.onMoss){p.vy=Math.min(p.vy,2);p.wallSliding=true;if(this.fr%4===0)this.particles.emit(p.facing===1?p.x+p.w:p.x,p.y+p.h*0.7,1,{color:'#888',size:2,life:12,gravity:0.02,vxMin:p.facing*-1,vxMax:p.facing*-0.3,vyMin:-0.5,vyMax:0.5});
+if(!p.gr&&p.vy>0){const wt=this.world.getTilesAround(p.x+p.facing*2,p.y,p.w,p.h);let tw=false;for(const t of wt)if(t.type===1&&U.rc({x:p.x+(p.facing===1?p.w:-4),y:p.y,w:4,h:p.h},t)){tw=true;break;}if(tw&&Math.abs(mx)>.3&&!p.onMoss){p.vy=Math.min(p.vy,2);p.wallSliding=true;if(this.fr%9===0)SFX.wallScrape();if(this.fr%4===0)this.particles.emit(p.facing===1?p.x+p.w:p.x,p.y+p.h*0.7,1,{color:'#888',size:2,life:12,gravity:0.02,vxMin:p.facing*-1,vxMax:p.facing*-0.3,vyMin:-0.5,vyMax:0.5});
 }else if(tw&&Math.abs(mx)>.3&&p.onMoss){
 // Moss: emit green dust, fall faster
 if(this.fr%6===0)this.particles.emit(p.facing===1?p.x+p.w:p.x,p.y+p.h*0.5,1,{color:'#4a8',size:2,life:10,gravity:0.05,vxMin:p.facing*-1,vxMax:0,vyMin:0,vyMax:0.5});
@@ -2448,6 +2580,9 @@ p.hang=true;p.facing=dir2;p.vy=0;p.vx=0;p.y=tileTop-7;p.x=dir2>0?tx4*32-p.w:(tx4
 this.particles.emit(dir2>0?p.x+p.w:p.x,p.y+8,6,{color:'#cbb89a',size:2,life:12,gravity:0.08,friction:0.9,vxMin:-1.5,vxMax:1.5,vyMin:-1.5,vyMax:0.5});SFX.footstep();break outer;}}}}
 if(p.gr&&!p._wg){if(p.maxFallSpeed>4){this.particles.emit(p.x+p.w/2,p.y+p.h,Math.min(10,Math.floor(p.maxFallSpeed)),{color:'#9a8a70',size:3,life:16,gravity:0.05,friction:0.9,vxMin:-3,vxMax:3,vyMin:-1.5,vyMax:0});p.sqy=Math.max(0.66,1-Math.min(p.maxFallSpeed,14)*0.028);p.sqx=2-p.sqy;}
 const slammed=p.slam,gp=p.hasGroundPound&&p.maxFallSpeed>=18;
+// Ordinary landings used to be silent — only slams made a sound. Weight tracks the fall so a hop
+// and a long drop are audibly different, which also doubles as feedback on how hard you came down.
+if(!slammed&&!gp&&p.maxFallSpeed>1.6)SFX.land((p.maxFallSpeed-1.6)/11);
 if(slammed||gp){this.shake.trigger(slammed?11:10,12);SFX.impact();const pcx=p.x+p.w/2,pcy=p.y+p.h;this.particles.emit(pcx,pcy,22,{color:'#fa4',size:4,life:20,glow:true,vxMin:-6,vxMax:6,vyMin:-3,vyMax:0});const gpRadius=slammed?78:60;const base=slammed?12+p.maxFallSpeed*2:p.maxFallSpeed*3;const gpDmg=Math.floor(base*(p.hasGroundPound&&slammed?1.6:1));for(const en of this.enemies){if(!en.alive)continue;const edist=U.dist(pcx,pcy,en.x+en.w/2,en.y+en.h/2);if(edist>gpRadius)continue;if(!hasLOS(this.world,pcx,pcy,en.x+en.w/2,en.y+en.h/2))continue;en.hit(gpDmg,Math.sign(en.x-p.x));this.ft.push(new FT(en.x+en.w/2,en.y,gpDmg+'','#fa0'));if(!en.alive)this.onKill(en);}}
 p.slam=false;p.maxFallSpeed=0;}p._wg=p.gr;const hpRatio=p.hp/p.mhp;if(hpRatio>0.3)SFX.stopHeartbeat();}
 
