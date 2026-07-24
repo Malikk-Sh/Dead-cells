@@ -542,7 +542,12 @@ this.col=c.color||'#0fa';this.gr=c.gravity!==undefined?c.gravity:.05;
 this.fr=c.friction||.98;this.sh=c.shrink!==undefined?c.shrink:true;this.gl=c.glow||false;
 }
 update(dt){const s=dt||1;this.vx*=Math.pow(this.fr,s);this.vy*=Math.pow(this.fr,s);this.vy+=this.gr*s;this.x+=this.vx*s;this.y+=this.vy*s;this.life-=s;return this.life>0;}
-draw(c,cam){const a=this.life/this.ml,sx=this.x-cam.x,sy=this.y-cam.y,s=this.sh?this.sz*a:this.sz;c.save();c.globalAlpha=a;if(this.gl){c.shadowColor=this.col;c.shadowBlur=s*4}c.fillStyle=this.col;c.fillRect(sx-s/2,sy-s/2,s,s);c.restore();}
+draw(c,cam){const a=this.life/this.ml,sx=this.x-cam.x,sy=this.y-cam.y,s=this.sh?this.sz*a:this.sz;c.save();
+// Glow particles previously ran a per-particle shadowBlur (a full blur pass each). During combat
+// hundreds spawn at once — the exact moment fps dips. Blit a cached additive glow sprite + a bright
+// core instead: same glowing look, no blur convolution, and it scales with particle count for free.
+if(this.gl){c.globalCompositeOperation='lighter';c.globalAlpha=a*0.9;const r=s*2.6;c.drawImage(glowSprite(this.col),sx-r,sy-r,r*2,r*2);c.globalCompositeOperation='source-over';}
+c.globalAlpha=a;c.fillStyle=this.col;c.fillRect(sx-s/2,sy-s/2,s,s);c.restore();}
 }
 
 class PS{
