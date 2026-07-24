@@ -520,10 +520,12 @@ draw(c,cam){const a=this.life/this.ml,sx=this.x-cam.x,sy=this.y-cam.y,s=this.sh?
 }
 
 class PS{
-constructor(){this.p=[]}
-emit(x,y,n,c={}){for(let i=0;i<n;i++)this.p.push(new Particle(x,y,{...c,vx:c.vx!==undefined?c.vx+U.rand(-1,1):U.rand(c.vxMin||-3,c.vxMax||3),vy:c.vy!==undefined?c.vy+U.rand(-1,1):U.rand(c.vyMin||-4,c.vyMax||0)}))}
+constructor(){this.p=[];this.MAX=340;}
+emit(x,y,n,c={}){for(let i=0;i<n;i++)this.p.push(new Particle(x,y,{...c,vx:c.vx!==undefined?c.vx+U.rand(-1,1):U.rand(c.vxMin||-3,c.vxMax||3),vy:c.vy!==undefined?c.vy+U.rand(-1,1):U.rand(c.vyMin||-4,c.vyMax||0)}));
+// bound the pool so runaway bursts can't tank the framerate — drop the oldest (already-fading) first
+if(this.p.length>this.MAX)this.p.splice(0,this.p.length-this.MAX);}
 update(dt){this.p=this.p.filter(p=>p.update(dt))}
-draw(c,cam){this.p.forEach(p=>p.draw(c,cam))}
+draw(c,cam){const W=canvas.width,H=canvas.height;for(const p of this.p){const sx=p.x-cam.x,sy=p.y-cam.y;if(sx<-40||sx>W+40||sy<-40||sy>H+40)continue;p.draw(c,cam);}}
 }
 
 class FT{
@@ -887,8 +889,7 @@ this.tethers=[];let near=0;
 for(const e of game.enemies){if(!e.alive||e===this||e.buffer)continue;const ex=e.x+e.w/2,ey=e.y+e.h/2,ed=U.dist(ecx,ecy,ex,ey);if(ed<215&&hasLOS(world,ecx,ecy,ex,ey)){near++;if(e.buffed>0)this.tethers.push(e);}}
 // pulse: lash out and empower the nearby pack
 if(this.buffCd<=0&&near>0){this.buffCd=U.ri(280,380);this.pulseR=1;this.snap=14;
-// soft, pleasant empower chime (a gentle triad) — quiet & rare; distance/walls handled by the enemy-update spatial wrap
-SFX.env(294,294,0.5,'sine',0.045,{atk:0.05});SFX.env(370,370,0.52,'sine',0.035,{atk:0.07});SFX.env(440,440,0.6,'triangle',0.028,{atk:0.09});
+// (thistle empower is silent — only visual pulse/tethers)
 for(const e of game.enemies){if(!e.alive||e===this||e.buffer)continue;const ex=e.x+e.w/2,ey=e.y+e.h/2;if(U.dist(ecx,ecy,ex,ey)<200&&hasLOS(world,ecx,ecy,ex,ey)){e.buffed=Math.max(e.buffed,300);if(this.tethers.indexOf(e)<0)this.tethers.push(e);game.particles.emit(ex,ey,9,{color:'#9fff5a',size:3,life:22,glow:true,gravity:-0.03,vxMin:-1.6,vxMax:1.6,vyMin:-2.2,vyMax:0});}}
 game.particles.emit(ecx,ecy-this.h*0.32,18,{color:'#b6ff5a',size:3,life:26,glow:true,vxMin:-3.2,vxMax:3.2,vyMin:-4,vyMax:1});game.particles.emit(ecx,ecy-this.h*0.32,8,{color:'#e0ffa0',size:2,life:14,glow:true,gravity:0,vxMin:-2,vxMax:2,vyMin:-2,vyMax:2});}
 // toxic spores creep along active tethers
@@ -1342,6 +1343,17 @@ spawn:{x:4,y:40},portal:{x:89,y:39},
 
 function getAllLevels(){return LEVELS.concat(window.GAME_LEVELS);}
 
+// ===== cached soft-glow sprite: a pre-rendered radial glow drawn with drawImage instead of the
+// costly per-particle shadowBlur (dozens of blurred draws/frame were a real hot-spot) =====
+const _glowSprites={};
+function glowSprite(color){let s=_glowSprites[color];if(s!==undefined)return s;
+const S=64,cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');
+// resolve the colour to r,g,b so the glow can fade to fully transparent regardless of input format
+g.fillStyle=color;g.fillRect(0,0,1,1);const px=g.getImageData(0,0,1,1).data;g.clearRect(0,0,S,S);
+const rgb=px[0]+','+px[1]+','+px[2];const rg=g.createRadialGradient(S/2,S/2,0,S/2,S/2,S/2);
+rg.addColorStop(0,'rgba('+rgb+',1)');rg.addColorStop(0.30,'rgba('+rgb+',0.5)');rg.addColorStop(1,'rgba('+rgb+',0)');
+g.fillStyle=rg;g.fillRect(0,0,S,S);_glowSprites[color]=cv;return cv;}
+
 // ===== ATMOSPHERIC PARALLAX BACKGROUND =====
 const BG={
 theme:null,seed:0,motes:[],rng:0,ph:0,
@@ -1412,8 +1424,9 @@ for(let i=0;i<3;i++){const fy=H*0.4+i*H*0.2+Math.sin(t/3000+i*2)*20;const drift=
 c.restore();
 // floating motes / rising spores
 c.save();c.globalCompositeOperation='lighter';
-for(const m of this.motes){const px=m.x-cam.x*m.depth+Math.sin(t/1000*m.sp+m.ph)*14;const py=m.y-cam.y*m.depth*0.6-(m.rise?((t/1000*m.sp*10)%world.ph):0)+Math.cos(t/1300*m.sp+m.ph)*10;const dsx=((px%world.pw)+world.pw)%world.pw,dsy=((py%world.ph)+world.ph)%world.ph;if(dsx<-10||dsx>W+10||dsy<-10||dsy>H+10)continue;const a=(0.28+Math.sin(t/700*m.sp+m.ph)*0.22)*m.depth;c.globalAlpha=Math.max(0,a);c.fillStyle=pal.mote;c.shadowColor=pal.mote;c.shadowBlur=m.sz*3.5;c.beginPath();c.arc(dsx,dsy,m.sz,0,Math.PI*2);c.fill();}
-c.shadowBlur=0;c.restore();
+const mgl=glowSprite(pal.mote);c.fillStyle=pal.mote;
+for(const m of this.motes){const px=m.x-cam.x*m.depth+Math.sin(t/1000*m.sp+m.ph)*14;const py=m.y-cam.y*m.depth*0.6-(m.rise?((t/1000*m.sp*10)%world.ph):0)+Math.cos(t/1300*m.sp+m.ph)*10;const dsx=((px%world.pw)+world.pw)%world.pw,dsy=((py%world.ph)+world.ph)%world.ph;if(dsx<-10||dsx>W+10||dsy<-10||dsy>H+10)continue;const a=(0.28+Math.sin(t/700*m.sp+m.ph)*0.22)*m.depth;c.globalAlpha=Math.max(0,a);const gr=m.sz*3.8;c.drawImage(mgl,dsx-gr,dsy-gr,gr*2,gr*2);c.beginPath();c.arc(dsx,dsy,m.sz,0,Math.PI*2);c.fill();}
+c.restore();
 },
 };
 
@@ -1824,24 +1837,38 @@ if(openBelow&&!hasCrumble)this._arch(c,tx,x1,ty,cam,ac);}
 tx=x1+1;}else tx++;}}
 }
 _arch(c,x0,x1,ty,cam,ac){const ts=this.world.ts,w=this.world,now=Date.now();
-const xL=x0*ts-cam.x,xR=(x1+1)*ts-cam.x,yTop=ty*ts-cam.y+7;
+const xL=x0*ts-cam.x,xR=(x1+1)*ts-cam.x,deckSurf=ty*ts-cam.y,yTop=deckSurf+7;
 // EACH pier finds its OWN ground independently (a short side no longer forces the other to float)
 const depthOf=(cx)=>{let d0=14;for(let d=1;d<=14;d++){const r=w.tiles[ty+d];if(r&&(r[cx]===1||r[cx]===2)){d0=d;break;}}return d0;};
 const depthL=depthOf(x0),depthR=depthOf(x1);
-const pw=Math.max(12,(x1-x0)*ts*0.14);const span=xR-xL;
+const pw=Math.max(12,(x1-x0)*ts*0.14);const span=xR-xL;const mid=(xL+xR)/2;
 const yBotL=yTop+depthL*ts,yBotR=yTop+depthR*ts;
 const rt=Math.max(9,pw*0.72);
-// anchor the arch beneath the deck: crown sits just under the walkway, springline dropped to
-// make room, height clamped to the shorter pier so the ring never pokes through the platform
 const avail=Math.min(depthL,depthR)*ts;
-const rise=Math.min(span*0.30,avail*0.5,118);const spring=yTop+rise*0.5+rt*0.6+6;
+// UNDER-DECK vault opening carved beneath the walkway (crown tucked just under the deck slab)
+const uRise=Math.min(span*0.26,avail*0.5,94);const uSpring=yTop+uRise*0.5+rt*0.55+7;
 const moss=w.theme==='crypt'?'#4e3a8a':w.theme==='ramparts'?'#6a7a2e':w.theme==='sewers'?'#2e6a2e':w.theme==='castle'?'#2a5a44':'#3a7a42';
 const moss2=w.theme==='crypt'?'#7a5ad0':w.theme==='ramparts'?'#9aba44':w.theme==='sewers'?'#5aca5a':w.theme==='castle'?'#4fb090':'#5aca5a';
 c.save();
-// deck mass with an arched opening carved beneath the walkway (each shoulder to its own ground)
+// deck mass with the under-deck arched opening carved beneath the walkway (each shoulder to its own ground)
 c.fillStyle=ac[0];
-c.beginPath();c.moveTo(xL,yTop);c.lineTo(xL,yBotL);c.lineTo(xL+pw,yBotL);c.lineTo(xL+pw,spring);
-c.quadraticCurveTo((xL+xR)/2,spring-rise,xR-pw,spring);c.lineTo(xR-pw,yBotR);c.lineTo(xR,yBotR);c.lineTo(xR,yTop);c.closePath();c.fill();
+c.beginPath();c.moveTo(xL,yTop);c.lineTo(xL,yBotL);c.lineTo(xL+pw,yBotL);c.lineTo(xL+pw,uSpring);
+c.quadraticCurveTo(mid,uSpring-uRise,xR-pw,uSpring);c.lineTo(xR-pw,yBotR);c.lineTo(xR,yBotR);c.lineTo(xR,yTop);c.closePath();c.fill();
+// ---- UNDER-DECK RECESSED VAULT (plain, utilitarian: dark throat + receding depth rings) ----
+const uL={x:xL+pw,y:uSpring},uR={x:xR-pw,y:uSpring},uC={x:mid,y:uSpring-uRise},uCrown={x:mid,y:uSpring-uRise*0.5},uFloor=Math.min(yBotL,yBotR);
+c.save();
+c.beginPath();c.moveTo(uL.x,uL.y);c.quadraticCurveTo(uC.x,uC.y,uR.x,uR.y);c.lineTo(uR.x,uFloor);c.lineTo(uL.x,uFloor);c.closePath();c.clip();
+const dg=c.createLinearGradient(0,uCrown.y,0,uFloor);dg.addColorStop(0,'rgba(0,0,0,0.6)');dg.addColorStop(1,'rgba(0,0,0,0.1)');c.fillStyle=dg;c.fillRect(xL,uCrown.y,span,uFloor-uCrown.y+4);
+const uscale=(p,s)=>({x:uCrown.x+(p.x-uCrown.x)*s,y:uCrown.y+(p.y-uCrown.y)*s});
+for(let k=1;k<=3;k++){const s=1-0.15*k,a=uscale(uL,s),b=uscale(uC,s),d=uscale(uR,s);c.strokeStyle='rgba(0,0,0,'+(0.28+0.12*k).toFixed(2)+')';c.lineWidth=2;c.beginPath();c.moveTo(a.x,a.y);c.quadraticCurveTo(b.x,b.y,d.x,d.y);c.stroke();c.strokeStyle='rgba(255,255,255,0.045)';c.lineWidth=1;c.beginPath();c.moveTo(a.x,a.y+1.5);c.quadraticCurveTo(b.x,b.y+1.5,d.x,d.y+1.5);c.stroke();}
+c.restore();
+// plain double rim on the opening edge (outer light bevel, inner shadow)
+c.strokeStyle=ac[3];c.lineWidth=2;c.beginPath();c.moveTo(uL.x,uL.y);c.quadraticCurveTo(uC.x,uC.y,uR.x,uR.y);c.stroke();
+c.strokeStyle='rgba(0,0,0,0.45)';c.lineWidth=1.4;c.beginPath();c.moveTo(uL.x+1.5,uL.y);c.quadraticCurveTo(uC.x,uC.y+2,uR.x-1.5,uR.y);c.stroke();
+// plain trapezoidal keystone crowning the under-deck vault
+c.fillStyle=ac[1];c.beginPath();c.moveTo(uCrown.x-6,uCrown.y+2);c.lineTo(uCrown.x-8,uCrown.y-6);c.lineTo(uCrown.x+8,uCrown.y-6);c.lineTo(uCrown.x+6,uCrown.y+2);c.closePath();c.fill();c.fillStyle=ac[3];c.fillRect(uCrown.x-8,uCrown.y-7,16,2);
+// moss clinging at the springing corners
+c.fillStyle=moss;c.globalAlpha=.5;c.beginPath();c.ellipse(uL.x+3,uL.y-2,4,2.4,0.4,0,Math.PI*2);c.fill();c.beginPath();c.ellipse(uR.x-3,uR.y-2,4,2.4,-0.4,0,Math.PI*2);c.fill();c.globalAlpha=1;
 // ---- detailed fluted pier: rounded shaft, capital, base, weathering, lush growth ----
 const pier=(pxL,colX,yBot)=>{const pcx=pxL+pw/2,h=yBot-yTop;
 const pg=c.createLinearGradient(pxL,0,pxL+pw,0);pg.addColorStop(0,ac[2]);pg.addColorStop(.26,ac[1]);pg.addColorStop(.5,ac[3]);pg.addColorStop(.74,ac[1]);pg.addColorStop(1,ac[2]);
@@ -1871,26 +1898,38 @@ c.fillStyle=moss2;for(let l=1;l<=3;l++){const lt=l/3.4,lx=vx+sway*lt,ly=yTop+11+
 if(((colX+vI)&3)===0){const fc=w.theme==='crypt'?'#d090ff':w.theme==='ramparts'?'#ffcf5a':'#ff9fd0';c.save();c.globalCompositeOperation='lighter';c.fillStyle=fc;c.shadowColor=fc;c.shadowBlur=5;for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2;c.beginPath();c.ellipse(vx+sway*1.5+Math.cos(pa)*2.2,yTop+11+vlen+Math.sin(pa)*2.2,1.4,0.9,pa,0,Math.PI*2);c.fill();}c.restore();}}
 };
 pier(xL,x0,yBotL);pier(xR-pw,x1,yBotR);
-// ---- CARVED VOUSSOIR ARCH RING (wedge stones + keystone, not flat stripes) ----
-const iaL={x:xL+pw,y:spring},iaR={x:xR-pw,y:spring},iaC={x:(xL+xR)/2,y:spring-rise};
-const oaL={x:xL+pw-rt,y:spring},oaR={x:xR-pw+rt,y:spring},oaC={x:(xL+xR)/2,y:spring-rise-rt*1.18};
+// ---- ABUTMENT BLOCKS on the deck: the springing bases for the load-bearing superstructure arch ----
+const aLx=xL+pw,aRx=xR-pw,asp=deckSurf-1;
+const drawAbut=(ax)=>{c.fillStyle=ac[1];c.fillRect(ax-8,asp-9,16,10);c.fillStyle=ac[3];c.fillRect(ax-8,asp-9,16,2.2);c.fillStyle=ac[2];c.fillRect(ax-8,asp-1.4,16,1.8);c.strokeStyle='rgba(0,0,0,0.3)';c.lineWidth=1;c.strokeRect(ax-8,asp-9,16,10);};
+drawAbut(aLx);drawAbut(aRx);
+// ---- ABOVE-DECK ORNATE VOUSSOIR ARCH: the bridge's load-bearing span rising over the walkway ----
+const aRise=Math.min(span*0.36,104);
+const iaL={x:aLx,y:asp},iaR={x:aRx,y:asp},iaC={x:mid,y:asp-aRise};
+const oaL={x:aLx-rt,y:asp},oaR={x:aRx+rt,y:asp},oaC={x:mid,y:asp-aRise-rt*1.18};
 const bez=(p0,p1,p2,t)=>{const u=1-t;return{x:u*u*p0.x+2*u*t*p1.x+t*t*p2.x,y:u*u*p0.y+2*u*t*p1.y+t*t*p2.y};};
 // fill the ring band
 c.beginPath();c.moveTo(oaL.x,oaL.y);c.quadraticCurveTo(oaC.x,oaC.y,oaR.x,oaR.y);c.lineTo(iaR.x,iaR.y);c.quadraticCurveTo(iaC.x,iaC.y,iaL.x,iaL.y);c.closePath();
-const rg=c.createLinearGradient(0,spring-rise-rt,0,spring);rg.addColorStop(0,ac[3]);rg.addColorStop(.5,ac[1]);rg.addColorStop(1,ac[2]);c.fillStyle=rg;c.fill();
+const rg=c.createLinearGradient(0,asp-aRise-rt,0,asp);rg.addColorStop(0,ac[3]);rg.addColorStop(.5,ac[1]);rg.addColorStop(1,ac[2]);c.fillStyle=rg;c.fill();
 // voussoir joints (radial), with a thin highlight per stone
 const nseg=Math.max(9,Math.round(span/15));
 for(let i=1;i<nseg;i++){const t=i/nseg,ip=bez(iaL,iaC,iaR,t),op=bez(oaL,oaC,oaR,t);c.strokeStyle='rgba(0,0,0,0.35)';c.lineWidth=1.5;c.beginPath();c.moveTo(ip.x,ip.y);c.lineTo(op.x,op.y);c.stroke();const t2=(i+0.5)/nseg,ip2=bez(iaL,iaC,iaR,t2),op2=bez(oaL,oaC,oaR,t2);c.strokeStyle='rgba(255,255,255,0.06)';c.lineWidth=1;c.beginPath();c.moveTo(ip2.x,ip2.y);c.lineTo(op2.x,op2.y);c.stroke();}
-// outer bright rim + inner shadowed edge
+// outer bright rim (extrados) + inner shadowed edge (intrados)
 c.strokeStyle=ac[3];c.lineWidth=1.8;c.beginPath();c.moveTo(oaL.x,oaL.y);c.quadraticCurveTo(oaC.x,oaC.y,oaR.x,oaR.y);c.stroke();
 c.strokeStyle='rgba(0,0,0,0.5)';c.lineWidth=1.8;c.beginPath();c.moveTo(iaL.x,iaL.y);c.quadraticCurveTo(iaC.x,iaC.y,iaR.x,iaR.y);c.stroke();
-// keystone at the crown
+// keystone crowning the arch (wider at the top, jutting up)
 const ksI=bez(iaL,iaC,iaR,0.5),ksO=bez(oaL,oaC,oaR,0.5);
-c.fillStyle=ac[1];c.beginPath();c.moveTo(ksI.x-7,ksI.y+1);c.lineTo(ksO.x-10,ksO.y-3);c.lineTo(ksO.x+10,ksO.y-3);c.lineTo(ksI.x+7,ksI.y+1);c.closePath();c.fill();
-c.fillStyle=ac[3];c.fillRect(ksO.x-10,ksO.y-5,20,3);c.fillStyle='rgba(0,0,0,0.3)';c.fillRect(ksI.x-7,ksI.y-2,14,2.5);
-c.fillStyle=ac[2];c.fillRect(ksI.x-1.5,ksO.y,3,ksI.y-ksO.y);
-// moss & a hanging tendril clinging under the arch
-c.fillStyle=moss;c.globalAlpha=.42;for(let i=1;i<nseg;i+=2){const t=i/nseg,ip=bez(iaL,iaC,iaR,t);c.beginPath();c.ellipse(ip.x,ip.y-1,2,1.2,0,0,Math.PI*2);c.fill();}c.globalAlpha=1;
+c.fillStyle=ac[1];c.beginPath();c.moveTo(ksI.x-7,ksI.y);c.lineTo(ksO.x-10,ksO.y-2);c.lineTo(ksO.x+10,ksO.y-2);c.lineTo(ksI.x+7,ksI.y);c.closePath();c.fill();
+c.fillStyle=ac[3];c.fillRect(ksO.x-10,ksO.y-4,20,3);c.fillStyle='rgba(0,0,0,0.28)';c.fillRect(ksI.x-7,ksI.y-2,14,2);
+c.fillStyle=ac[2];c.fillRect(ksI.x-1.5,ksO.y-1,3,ksI.y-ksO.y);
+// small finial crowning the keystone
+c.fillStyle=ac[3];c.beginPath();c.moveTo(ksO.x,ksO.y-4);c.lineTo(ksO.x-3,ksO.y-10);c.lineTo(ksO.x+3,ksO.y-10);c.closePath();c.fill();
+c.save();c.globalCompositeOperation='lighter';c.fillStyle=moss2;c.shadowColor=moss2;c.shadowBlur=5;c.beginPath();c.arc(ksO.x,ksO.y-11,1.7,0,Math.PI*2);c.fill();c.restore();
+// lush growth clinging to the intrados + trailing vines hanging toward the walkway
+c.fillStyle=moss;c.globalAlpha=.4;for(let i=1;i<nseg;i+=2){const t=i/nseg,ip=bez(iaL,iaC,iaR,t);c.beginPath();c.ellipse(ip.x,ip.y+1,2,1.2,0,0,Math.PI*2);c.fill();}c.globalAlpha=1;
+c.lineWidth=1.5;for(let vI=0;vI<4;vI++){const tt=0.26+vI*0.16,ap=bez(iaL,iaC,iaR,tt),vlen=10+((x0*7+vI*13)%18),sway=Math.sin(now/950+x0+vI*1.6)*2.4;
+c.strokeStyle=moss;c.beginPath();c.moveTo(ap.x,ap.y);c.quadraticCurveTo(ap.x+sway,ap.y+vlen*0.55,ap.x+sway*1.4,ap.y+vlen);c.stroke();
+c.fillStyle=moss2;for(let l=1;l<=2;l++){const lt=l/2.4,lx=ap.x+sway*lt,ly=ap.y+vlen*lt;c.beginPath();c.ellipse(lx+(l%2?2.4:-2.4),ly,2.2,1.3,l%2?0.6:-0.6,0,Math.PI*2);c.fill();}
+if(((x0+vI)&3)===0){const fc=w.theme==='crypt'?'#d090ff':w.theme==='ramparts'?'#ffcf5a':'#ff9fd0';c.save();c.globalCompositeOperation='lighter';c.fillStyle=fc;c.shadowColor=fc;c.shadowBlur=5;for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2;c.beginPath();c.ellipse(ap.x+sway*1.4+Math.cos(pa)*2,ap.y+vlen+Math.sin(pa)*2,1.3,0.85,pa,0,Math.PI*2);c.fill();}c.restore();}}
 c.restore();
 }
 
@@ -1917,14 +1956,21 @@ else if(((tx+sI)&3)===0){c.save();c.globalCompositeOperation='lighter';const bc=
 drawPost(c){const W=canvas.width,H=canvas.height,pal=BG.pal;if(!pal)return;
 // cinematic color grade — wash shadows toward the biome's atmospheric hue
 c.save();c.globalCompositeOperation='soft-light';c.globalAlpha=0.42;c.fillStyle='rgb('+pal.haze+')';c.fillRect(0,0,W,H);c.restore();
-// gentle warm/cool split: lift top toward the ray colour
-c.save();c.globalCompositeOperation='overlay';c.globalAlpha=0.14;const sg=c.createLinearGradient(0,0,0,H);sg.addColorStop(0,pal.ray+'1)');sg.addColorStop(0.6,'rgba(0,0,0,0)');sg.addColorStop(1,'rgba(0,0,0,0.5)');c.fillStyle=sg;c.fillRect(0,0,W,H);c.restore();
+// gentle warm/cool split: lift top toward the ray colour (static gradient — cached, only rebuilt on resize / biome change)
+if(!this._splitGrad||this._splitH!==H||this._splitRay!==pal.ray){this._splitH=H;this._splitRay=pal.ray;const sg=c.createLinearGradient(0,0,0,H);sg.addColorStop(0,pal.ray+'1)');sg.addColorStop(0.6,'rgba(0,0,0,0)');sg.addColorStop(1,'rgba(0,0,0,0.5)');this._splitGrad=sg;}
+c.save();c.globalCompositeOperation='overlay';c.globalAlpha=0.14;c.fillStyle=this._splitGrad;c.fillRect(0,0,W,H);c.restore();
 // cheap bloom: blur a downscaled copy of the frame and add it back
 const bw=Math.max(2,W>>2),bh=Math.max(2,H>>2);
 if(bloomC.width!==bw||bloomC.height!==bh){bloomC.width=bw;bloomC.height=bh;}
 bctx.clearRect(0,0,bw,bh);bctx.drawImage(canvas,0,0,bw,bh);
 c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.3;c.imageSmoothingEnabled=true;c.filter='blur(3px)';c.drawImage(bloomC,0,0,W,H);c.filter='none';c.restore();
 const t=Date.now();
+// ---- light atmospheric haze veil: soft breathing mist layered for volumetric depth (per-biome density) ----
+{const thH=this.world.theme;const hz=thH==='crypt'?0.085:thH==='castle'?0.08:thH==='sewers'?0.05:thH==='ramparts'?0.058:0.066;
+const breathe=hz*(0.82+0.18*Math.sin(t/3400));
+c.save();c.globalCompositeOperation='screen';
+for(let i=0;i<3;i++){const yc=H*(0.30+i*0.23)+Math.sin(t/4200+i*2.1)*H*0.045;const a=(breathe*(1-i*0.17)).toFixed(3);const band=c.createLinearGradient(0,yc-H*0.30,0,yc+H*0.30);band.addColorStop(0,'rgba('+pal.haze+',0)');band.addColorStop(0.5,'rgba('+pal.haze+','+a+')');band.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=band;c.fillRect(0,yc-H*0.30,W,H*0.60);}
+c.restore();}
 // soft volumetric light shafts through the ruins
 c.save();c.globalCompositeOperation='lighter';
 for(let i=0;i<2;i++){const bx=W*(0.28+i*0.42)+Math.sin(t/6000+i*2)*W*0.04,bwd=W*0.13;const bg2=c.createLinearGradient(bx,0,bx-W*0.1,H);bg2.addColorStop(0,pal.ray+(0.05+Math.sin(t/2600+i)*0.02).toFixed(3)+')');bg2.addColorStop(1,pal.ray+'0)');c.fillStyle=bg2;c.beginPath();c.moveTo(bx,0);c.lineTo(bx+bwd,0);c.lineTo(bx+bwd-W*0.14,H);c.lineTo(bx-W*0.14,H);c.closePath();c.fill();}
@@ -1940,12 +1986,12 @@ c.restore();
 const cam=this._camNow,zoom=this._zoomNow||1;
 if(cam){const vwl=W/zoom,vhl=H/zoom;
 if(!this._flies){this._flies=[];for(let i=0;i<24;i++)this._flies.push({x:cam.x+Math.random()*vwl,y:cam.y+Math.random()*vhl,ph:Math.random()*99,sp:0.3+Math.random()*0.7,sz:1+Math.random()*1.7});}
-c.save();c.globalCompositeOperation='lighter';const fc=pal.mote;c.fillStyle=fc;c.shadowColor=fc;
+c.save();c.globalCompositeOperation='lighter';const fc=pal.mote,fgl=glowSprite(fc);c.fillStyle=fc;
 for(const fl of this._flies){fl.x+=Math.sin(t/900*fl.sp+fl.ph)*0.35;fl.y+=Math.cos(t/1100*fl.sp+fl.ph)*0.25-0.12;
 let sx=(fl.x-cam.x)*zoom,sy=(fl.y-cam.y)*zoom;
 if(sx<-40||sx>W+40||sy<-40||sy>H+40){fl.x=cam.x+Math.random()*vwl;fl.y=cam.y+Math.random()*vhl;sx=(fl.x-cam.x)*zoom;sy=(fl.y-cam.y)*zoom;}
-const a=0.35+Math.sin(t/500*fl.sp+fl.ph)*0.35;c.globalAlpha=Math.max(0,a);c.shadowBlur=fl.sz*4;c.beginPath();c.arc(sx,sy,fl.sz,0,Math.PI*2);c.fill();}
-c.shadowBlur=0;c.restore();}
+const a=0.35+Math.sin(t/500*fl.sp+fl.ph)*0.35;c.globalAlpha=Math.max(0,a);const gr=fl.sz*4.4;c.drawImage(fgl,sx-gr,sy-gr,gr*2,gr*2);c.beginPath();c.arc(sx,sy,fl.sz,0,Math.PI*2);c.fill();}
+c.restore();}
 // ---- per-biome weather / ambient overlay: snow, sewer rain, rampart embers, crypt spirits, dungeon dust ----
 {const th=this.world.theme;const cfg=th==='castle'?{n:74,col:'#dbe8ff',sz:[1,2.6],vy:[0.3,1.0],vx:[-0.3,0.5],glow:false,mode:'flake'}:th==='sewers'?{n:80,col:'#9fc0d0',sz:[0.6,1.4],vy:[3.2,5.6],vx:[0,0.2],glow:false,mode:'rain'}:th==='ramparts'?{n:52,col:'#ff9442',sz:[1,2.4],vy:[-0.95,-0.35],vx:[-0.3,0.4],glow:true,mode:'ember'}:th==='crypt'?{n:34,col:'#b070ff',sz:[1.4,3],vy:[-0.5,-0.16],vx:[-0.25,0.25],glow:true,mode:'spirit'}:{n:38,col:'#6a6a84',sz:[0.8,1.8],vy:[0.14,0.5],vx:[-0.2,0.2],glow:false,mode:'dust'};
 if(!this._wthr||this._wthrMode!==cfg.mode){this._wthrMode=cfg.mode;this._wthr=[];for(let i=0;i<cfg.n;i++)this._wthr.push({x:Math.random()*W,y:Math.random()*H,vx:cfg.vx[0]+Math.random()*(cfg.vx[1]-cfg.vx[0]),vy:cfg.vy[0]+Math.random()*(cfg.vy[1]-cfg.vy[0]),sz:cfg.sz[0]+Math.random()*(cfg.sz[1]-cfg.sz[0]),ph:Math.random()*99});}
