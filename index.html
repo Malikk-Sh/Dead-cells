@@ -1387,6 +1387,15 @@ function halo(c,x,y,r,color,a){c.globalAlpha=a;c.drawImage(glowSprite(color),x-r
 // every entity of a type share one gradient instead of allocating an identical one each frame.
 const _lgCache={};
 function linGrad(c,key,x0,y0,x1,y1,stops){let g=_lgCache[key];if(g)return g;g=c.createLinearGradient(x0,y0,x1,y1);for(let i=0;i<stops.length;i++)g.addColorStop(stops[i][0],stops[i][1]);_lgCache[key]=g;return g;}
+// Baked pickup sprites (glow included) — pickups are drawn every frame with several fills + a
+// shadow-blur pass each; baking the static art into one 44px sprite (anchor at 16,16) turns each
+// into a single blit and drops the per-item shadow-blur. Scales directly with items on screen.
+const _itemSpr={},_itemA=16;
+function itemSprite(type){let s=_itemSpr[type];if(s)return s;const S=44,cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');g.translate(_itemA,_itemA);
+if(type==='health'){g.fillStyle='rgba(255,60,60,0.14)';g.beginPath();g.arc(6,7,11,0,Math.PI*2);g.fill();g.fillStyle='#a02020';g.fillRect(2,4,8,9);g.fillStyle='#e84040';g.shadowColor='#f00';g.shadowBlur=8;g.fillRect(3,5,6,7);g.shadowBlur=0;g.fillStyle='#fff';g.fillRect(5,2,2,7);g.fillRect(3,4,6,2);g.fillStyle='#6a3010';g.fillRect(4,0,4,3);}
+else if(type==='gold'){g.fillStyle='rgba(255,200,40,0.14)';g.beginPath();g.arc(6,6,10,0,Math.PI*2);g.fill();g.fillStyle='#c89010';g.beginPath();g.arc(6,6,5,0,Math.PI*2);g.fill();g.fillStyle='#fd0';g.shadowColor='#fa0';g.shadowBlur=6;g.beginPath();g.arc(6,6,4,0,Math.PI*2);g.fill();g.shadowBlur=0;g.fillStyle='#fff6c0';g.fillRect(4,3,2,2);}
+else if(type==='cellcore'){g.fillStyle='#0fa';g.shadowColor='#0fa';g.shadowBlur=12;g.fillRect(-4,-4,8,8);g.shadowBlur=0;g.fillStyle='#bfffe8';g.fillRect(-2,-2,3,3);}
+_itemSpr[type]=cv;return cv;}
 
 // ===== ATMOSPHERIC PARALLAX BACKGROUND =====
 const BG={
@@ -2061,16 +2070,21 @@ if(!this._vg2||this._vg2W!==W||this._vg2H!==H){this._vg2W=W;this._vg2H=H;const v
 c.fillStyle=this._vg2;c.fillRect(0,0,W,H);
 }
 drawLighting(c,cam,zoom){
-if(lightC.width!==canvas.width||lightC.height!==canvas.height){lightC.width=canvas.width;lightC.height=canvas.height;}
+// The light buffer is rendered at half resolution (a quarter of the pixels): every full-screen
+// darkness fill + mask blit costs 4x less fill-rate, and the soft gradient light is upscaled on
+// the final composite with no visible loss. This is the single most expensive phase, so halving
+// its resolution is the biggest low-risk saving — especially on fill-rate-bound mobile GPUs.
+const ls=0.5,LW=Math.max(1,canvas.width>>1),LH=Math.max(1,canvas.height>>1);
+if(lightC.width!==LW||lightC.height!==LH){lightC.width=LW;lightC.height=LH;}
 const dark={dungeon:0.45,sewers:0.5,ramparts:0.38,castle:0.42,crypt:0.55}[this.world.theme]||0.45;
-lctx.globalCompositeOperation='source-over';lctx.globalAlpha=1;lctx.clearRect(0,0,lightC.width,lightC.height);
-lctx.fillStyle=`rgba(3,5,12,${dark})`;lctx.fillRect(0,0,lightC.width,lightC.height);
+lctx.globalCompositeOperation='source-over';lctx.globalAlpha=1;lctx.clearRect(0,0,LW,LH);
+lctx.fillStyle=`rgba(3,5,12,${dark})`;lctx.fillRect(0,0,LW,LH);
 lctx.globalCompositeOperation='destination-out';
 // Every light source reuses one baked radial mask via drawImage (a cheap GPU texture blit)
 // instead of allocating + rasterising a fresh radial gradient per source per frame. The mask's
 // alpha profile matches the original gradient's stops exactly, so the look is unchanged; this
 // is a pure win that scales with the number of on-screen lights (torches, enemies, items).
-const cut=(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom,sy=(wy-cam.y)*zoom,sr=r*zoom;if(sx<-sr||sx>lightC.width+sr||sy<-sr||sy>lightC.height+sr)return;lctx.globalAlpha=a;lctx.drawImage(_lightMask,sx-sr,sy-sr,sr*2,sr*2);};
+const cut=(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom*ls,sy=(wy-cam.y)*zoom*ls,sr=r*zoom*ls;if(sx<-sr||sx>LW+sr||sy<-sr||sy>LH+sr)return;lctx.globalAlpha=a;lctx.drawImage(_lightMask,sx-sr,sy-sr,sr*2,sr*2);};
 const t=Date.now(),p=this.player;
 cut(p.x+p.w/2,p.y+p.h*0.4,150,1);
 for(const d of this.decos){if(d.type==='torch')cut(d.x+16,d.y-18,120+Math.sin(t/90+d.x)*9,0.95);else if(d.type==='lantern')cut(d.x+16,d.y-12,110,0.9);else if(d.type==='brazier')cut(d.x+16,d.y-6,120+Math.sin(t/80+d.x)*10,0.95);else if(d.type==='candle')cut(d.x+16,d.y-4,52,0.7);else if(d.type==='crystal')cut(d.x+16,d.y+2,80,0.7);else if(d.type==='mushroom')cut(d.x+14,d.y+6,55,0.6);}
@@ -2082,7 +2096,7 @@ for(const it of this.items)if(it.type==='cell')cut(it.x+6,it.y+6,34,0.55);
 for(const ch of this.chests)if(ch.cursed&&!ch.opened)cut(ch.x+13,ch.y+8,60,0.6);
 for(const sw of this.shockwaves)cut(sw.x,sw.y-6,50,0.85);
 lctx.globalAlpha=1;lctx.globalCompositeOperation='source-over';
-c.drawImage(lightC,0,0);
+c.drawImage(lightC,0,0,canvas.width,canvas.height);
 }
 
 updateGlobs(dt){const p=this.player;
@@ -2234,7 +2248,7 @@ c.fillStyle='#3a7a3a';c.fillRect(ts/2-5,-ts/2+2,5,ts-4);
 for(let i=0;i<5;i++){const gy=-ts/2+i*7;c.fillStyle=i%2===0?'#4aaa4a':'#3a8a3a';c.fillRect(ts/2-7,gy,4,5);c.fillRect(ts/2-3,gy+3,5,4);}
 c.restore();
 }
-for(const it of this.items){if(it.collected)continue;const bobv=Math.sin(Date.now()/400+it.bob)*3,sx=it.x-cam.x,sy=it.y-cam.y+bobv;if(sx<-20||sx>canvas.width+20)continue;c.save();if(it.type==='cell'){const pl=0.7+Math.sin(Date.now()/200+it.bob)*0.3;c.globalCompositeOperation='lighter';c.fillStyle='rgba(0,255,170,0.12)';c.beginPath();c.arc(sx+6,sy+6,12*pl,0,Math.PI*2);c.fill();c.globalCompositeOperation='source-over';c.save();c.translate(sx+6,sy+6);c.rotate(Date.now()/500);c.fillStyle='#0fa';c.shadowColor='#0fa';c.shadowBlur=12;c.fillRect(-4,-4,8,8);c.fillStyle='#bfffe8';c.fillRect(-2,-2,3,3);c.shadowBlur=0;c.restore();}else if(it.type==='health'){c.fillStyle='rgba(255,60,60,0.14)';c.beginPath();c.arc(sx+6,sy+7,11,0,Math.PI*2);c.fill();c.fillStyle='#a02020';c.fillRect(sx+2,sy+4,8,9);c.fillStyle='#e84040';c.shadowColor='#f00';c.shadowBlur=8;c.fillRect(sx+3,sy+5,6,7);c.shadowBlur=0;c.fillStyle='#fff';c.fillRect(sx+5,sy+2,2,7);c.fillRect(sx+3,sy+4,6,2);c.fillStyle='#6a3010';c.fillRect(sx+4,sy,4,3);}else if(it.type==='gold'){c.fillStyle='rgba(255,200,40,0.14)';c.beginPath();c.arc(sx+6,sy+6,10,0,Math.PI*2);c.fill();c.fillStyle='#c89010';c.beginPath();c.arc(sx+6,sy+6,5,0,Math.PI*2);c.fill();c.fillStyle='#fd0';c.shadowColor='#fa0';c.shadowBlur=6;c.beginPath();c.arc(sx+6,sy+6,4,0,Math.PI*2);c.fill();c.shadowBlur=0;c.fillStyle='#fff6c0';c.fillRect(sx+4,sy+3,2,2);}c.restore();}
+for(const it of this.items){if(it.collected)continue;const bobv=Math.sin(Date.now()/400+it.bob)*3,sx=it.x-cam.x,sy=it.y-cam.y+bobv;if(sx<-20||sx>canvas.width+20)continue;c.save();if(it.type==='cell'){const pl=0.7+Math.sin(Date.now()/200+it.bob)*0.3;c.globalCompositeOperation='lighter';c.fillStyle='rgba(0,255,170,0.12)';c.beginPath();c.arc(sx+6,sy+6,12*pl,0,Math.PI*2);c.fill();c.globalCompositeOperation='source-over';c.translate(sx+6,sy+6);c.rotate(Date.now()/500);c.drawImage(itemSprite('cellcore'),-_itemA,-_itemA);}else if(it.type==='health'){c.drawImage(itemSprite('health'),sx-_itemA,sy-_itemA);}else if(it.type==='gold'){c.drawImage(itemSprite('gold'),sx-_itemA,sy-_itemA);}c.restore();}
 const pp=this.portalPos,psx=pp.x-cam.x,psy=pp.y-cam.y;if(psx>-60&&psx<canvas.width+60){c.save();if(this.bossGate){c.globalAlpha=0.3;c.strokeStyle='#665';c.lineWidth=3;c.beginPath();c.ellipse(psx+16,psy+16,20,28,0,0,Math.PI*2);c.stroke();c.strokeStyle='#a33';c.lineWidth=2.5;c.beginPath();c.moveTo(psx+2,psy-6);c.lineTo(psx+30,psy+38);c.moveTo(psx+30,psy-6);c.lineTo(psx+2,psy+38);c.stroke();c.restore();}else{const pulse=Math.sin(Date.now()/300)*.3+.7,rot=Date.now()/700;c.globalCompositeOperation='lighter';const pg=c.createRadialGradient(psx+16,psy+16,2,psx+16,psy+16,42*pulse);pg.addColorStop(0,'rgba(180,90,255,0.4)');pg.addColorStop(.5,'rgba(140,60,220,0.16)');pg.addColorStop(1,'rgba(120,40,200,0)');c.fillStyle=pg;c.beginPath();c.arc(psx+16,psy+16,44,0,Math.PI*2);c.fill();c.globalCompositeOperation='source-over';for(let r=0;r<3;r++){c.strokeStyle=`rgba(190,120,255,${0.5-r*0.12})`;c.shadowColor='#b060ff';c.shadowBlur=16*pulse;c.lineWidth=2.5-r*0.5;c.beginPath();c.ellipse(psx+16,psy+16,(20-r*4),(28-r*4),rot*(r%2?1:-1),0,Math.PI*2);c.stroke();}c.shadowBlur=0;if(this.fr%6===0)this.particles.emit(pp.x+16,pp.y+16+U.rand(-14,14),1,{color:'#c080ff',size:2,life:30,glow:true,gravity:-0.02,vxMin:-0.3,vxMax:0.3,vyMin:-0.8,vyMax:-0.2});c.restore();}}
 // soft ground shadows anchor entities to the world
 c.save();c.fillStyle='rgba(0,0,0,0.3)';
