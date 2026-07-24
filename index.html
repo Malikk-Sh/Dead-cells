@@ -1878,11 +1878,16 @@ const ac={dungeon:['#242444','#2e2e52','#16162c','#3a3a60'],sewers:['#1c3626','#
 // a bridge whose deck has scrolled off the top still needs its piers drawn where they reach into frame
 const visL=Math.floor(cam.x/ts)-6,visR=Math.floor((cam.x+vw)/ts)+6,sy0=Math.max(0,Math.floor(cam.y/ts)-14),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
 for(let ty=sy0;ty<=ey;ty++){const row=w.tiles[ty];if(!row)continue;let tx=0;
-while(tx<w.tw){if(row[tx]===2){let x1=tx;while(x1+1<w.tw&&row[x1+1]===2)x1++;const runLen=x1-tx+1;
+// An arch-bearing deck is a run of solid platform tiles (type 2). Crumbling-platform tiles are ALSO
+// type 2 but must never anchor a stone arch (they fall away) — and, the bug, must not merge with an
+// adjacent normal deck and drag its arch away with them. So treat a crumble tile as a run boundary:
+// a normal deck keeps its own arch whether or not a crumbling platform sits right beside it.
+const ck=this._crumbleKeys,isDeck=(x)=>row[x]===2&&!(ck&&ck.has(ty+','+x));
+while(tx<w.tw){if(isDeck(tx)){let x1=tx;while(x1+1<w.tw&&isDeck(x1+1))x1++;const runLen=x1-tx+1;
 // draw only if the full run overlaps the view, but always at its true full extent (no width popping / vanishing)
-if(runLen>=3&&x1>=visL&&tx<=visR){let hasCrumble=false;if(this._crumbleKeys)for(let cx=tx;cx<=x1;cx++)if(this._crumbleKeys.has(ty+','+cx)){hasCrumble=true;break;}
+if(runLen>=3&&x1>=visL&&tx<=visR){
 const below=w.tiles[ty+2];const openBelow=!(below&&(below[tx]===1||below[tx]===2))&&!(below&&(below[x1]===1||below[x1]===2));
-if(openBelow&&!hasCrumble)this._arch(c,tx,x1,ty,cam,ac);}
+if(openBelow)this._arch(c,tx,x1,ty,cam,ac);}
 tx=x1+1;}else tx++;}}
 }
 _arch(c,x0,x1,ty,cam,ac){const ts=this.world.ts,w=this.world,now=Date.now();
