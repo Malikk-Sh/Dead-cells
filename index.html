@@ -177,6 +177,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Co
 <div class=settings-label>SFX <span class=settings-val id=SfxVal>70%</span></div>
 <input type=range class=vol-slider id=SfxVol min=0 max=100 value=70 oninput="G.setVolume('sfx',this.value)">
 </div>
+<div class=settings-row style="border-top:1px solid #223;padding-top:14px;margin-top:20px">
+<div class=settings-label>GAME SPEED <span class=settings-val id=SpeedVal>72%</span></div>
+<input type=range class=vol-slider id=GameSpeed min=50 max=120 value=72 oninput="G.setGameSpeed(this.value)">
+<div class=settings-val style="font-size:9px;opacity:.7;line-height:1.5">Lower = slower, heavier combat with more time to read enemy tells. 100% is the classic arcade pace.</div>
+</div>
 </div>
 <div class=ov-skip onclick="G.closeSettings()" style="margin-top:24px">← BACK</div>
 </div>
@@ -498,7 +503,48 @@ dist(x1,y1,x2,y2){return Math.sqrt((x2-x1)**2+(y2-y1)**2)},
 rand(a,b){return Math.random()*(b-a)+a},
 ri(a,b){return Math.floor(U.rand(a,b+1))},
 ch(p){return Math.random()<p},
-rc(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+rc(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y},
+// smootherstep — C2-continuous, used everywhere we blend a mask so seams never show a crease
+ss(t){return t*t*t*(t*(t*6-15)+10)},
+// approach: frame-rate independent easing toward a target with a per-frame rate
+app(v,target,rate,dt){return v+(target-v)*(1-Math.pow(1-rate,dt||1))}
+};
+
+// ===== GLOBAL TIME SCALE =====
+// The whole simulation runs on a fixed dt expressed in "60fps frames". Scaling that single number
+// reparametrises time uniformly: velocities, gravity, cooldowns, animation timers and projectile
+// speeds all stretch together, so jump arcs and level geometry stay pixel-identical while the game
+// reads slower and more deliberate. That is exactly the pacing we want — heavy, readable combat
+// instead of a twitchy scramble — and it costs one multiply.
+const TIME={scale:0.72,
+  load(){try{const v=parseFloat(localStorage.getItem('dp_speed'));if(v>=0.5&&v<=1.2)this.scale=v;}catch(e){}},
+  set(v){this.scale=U.clamp(v,0.5,1.2);try{localStorage.setItem('dp_speed',String(this.scale));}catch(e){}}};
+TIME.load();
+
+// ===== DETERMINISTIC NOISE (value noise + fBm + domain warp) =====
+// Terrain detail used to be picked by raw integer hashes like `(tx*37+ty*61)&3`. Those are white
+// noise: every tile is independent, so moss, cracks and plants scatter with a uniform, obviously
+// artificial density and the low-order bit patterns tile visibly across a wall. Coherent noise
+// instead varies smoothly over space, which is what real weathering does — damp patches, moss
+// colonies and lush overgrowth form *regions*, with bare stone between them. Everything below is
+// integer-seeded and stateless, so a tile always renders identically (no shimmering between frames)
+// and the same map always looks the same.
+const NZ={
+  h2(x,y,s){let n=(x|0)*374761393+(y|0)*668265263+(s|0)*1442695041;n=(n^(n>>>13))*1274126177;n=n^(n>>>16);return (n>>>0)/4294967295;},
+  // value noise: bilinear blend of hashed lattice corners with a smootherstep fade
+  v2(x,y,s){const xi=Math.floor(x),yi=Math.floor(y),xf=U.ss(x-xi),yf=U.ss(y-yi);
+    const a=this.h2(xi,yi,s),b=this.h2(xi+1,yi,s),c=this.h2(xi,yi+1,s),d=this.h2(xi+1,yi+1,s);
+    return (a+(b-a)*xf)+((c+(d-c)*xf)-(a+(b-a)*xf))*yf;},
+  // fractal brownian motion: octaves of value noise, each half the amplitude and twice the frequency
+  fbm(x,y,s,oct){let f=1,amp=0.5,sum=0,norm=0;const o=oct||3;
+    for(let i=0;i<o;i++){sum+=this.v2(x*f,y*f,s+i*97)*amp;norm+=amp;f*=2.03;amp*=0.5;}
+    return sum/norm;},
+  // domain-warped fbm: distorting the sample position with more noise breaks up the axis-aligned
+  // "cloud" look of plain fbm and produces the organic, veiny patches real lichen and damp make
+  warp(x,y,s,oct){const wx=this.fbm(x*0.7,y*0.7,s+311,2)-0.5,wy=this.fbm(x*0.7+5.2,y*0.7+1.3,s+733,2)-0.5;
+    return this.fbm(x+wx*1.8,y+wy*1.8,s,oct||3);},
+  // ridged noise: sharp creases — good for cracks, strata and rock veining
+  ridge(x,y,s,oct){return 1-Math.abs(this.fbm(x,y,s,oct)*2-1);}
 };
 
 function hasLOS(w,x1,y1,x2,y2){
@@ -508,29 +554,88 @@ if(ty>=0&&ty<w.th&&tx>=0&&tx<w.tw&&w.tiles[ty][tx]===1)return false;}
 return true;
 }
 
+// ===== COMBO DEFINITION =====
+// Four beats with distinct silhouettes, so the chain reads as choreography rather than a repeated
+// twitch. Each entry drives the hitbox, the arm animation and the slash ribbon from one place, so
+// they can never drift out of sync.
+//   arc   : the blade's angular path [from,to] in the character's local frame (radians, +y is down)
+//   wind  : fraction of the swing spent in anticipation (pull-back) before the strike commits
+//   hitAt : fraction of the swing at which damage lands — later on heavy beats, so they telegraph
+//   shape : 'arc' sweeps a crescent, 'stab' drives a straight lance, 'ring' is a full-circle spin
+const COMBO=[
+ {name:'Cleave',   arc:[-2.15, 1.20], wind:0.30, hitAt:0.34, dur:1.00, dmg:1.00, range:1.00, shape:'arc',  tilt:-0.42, lunge:1.6, kb:1.1, up:0,   col:'#bfe6ff', shake:[3,4],  hold:2},
+ {name:'Riposte',  arc:[ 1.45,-1.95], wind:0.26, hitAt:0.30, dur:0.92, dmg:1.22, range:1.04, shape:'arc',  tilt: 0.46, lunge:2.1, kb:1.4, up:1.5, col:'#a8ecff', shake:[4,5],  hold:3},
+ {name:'Impale',   arc:[-0.85,-0.05], wind:0.38, hitAt:0.44, dur:1.06, dmg:1.45, range:1.34, shape:'stab', tilt: 0.00, lunge:5.4, kb:2.0, up:0,   col:'#d8f2ff', shake:[5,6],  hold:4},
+ {name:'Moonfall', arc:[-3.60, 1.55], wind:0.42, hitAt:0.50, dur:1.34, dmg:1.85, range:1.30, shape:'ring', tilt: 0.00, lunge:3.2, kb:2.9, up:6.5, col:'#eaf7ff', shake:[10,12],hold:6}
+];
+
 class SlashArc{
-constructor(x,y,facing,range,color,step){this.x=x;this.y=y;this.facing=facing;this.range=range;this.color=color||'#adf';this.step=step||0;this.life=step===2?11:8;this.ml=this.life;
-// per-combo-step arc geometry: [centerAngle, halfSpan, tilt, girth]
-const g=[[0,1.15,-0.5,1],[0,1.15,0.5,1],[0,1.5,0,1.55]][this.step|0]||[0,1.15,0,1];
-this.ca=g[0];this.span=g[1];this.tilt=g[2];this.girth=g[3];}
-update(){this.life--;return this.life>0;}
+constructor(x,y,facing,range,color,step){this.x=x;this.y=y;this.facing=facing;this.range=range;this.step=U.clamp(step|0,0,3);
+const cd=COMBO[this.step];this.color=color||cd.col;this.shape=cd.shape;this.tilt=cd.tilt;
+this.life=this.shape==='ring'?15:this.shape==='stab'?10:9;this.ml=this.life;
+// sparks riding the leading edge — seeded once so they don't jitter between frames
+this.sp=[];const n=this.shape==='ring'?12:this.shape==='stab'?5:7;
+for(let i=0;i<n;i++)this.sp.push({a:U.rand(-1,1),r:U.rand(0.55,1.05),sz:U.rand(0.8,2.2),sk:U.rand(0.6,1.5)});}
+update(dt){this.life-=(dt||1);return this.life>0;}
 draw(c,cam){
-const sx=this.x-cam.x,sy=this.y-cam.y,a=this.life/this.ml,ease=Math.sin(a*Math.PI*0.5);
-c.save();c.translate(sx,sy);
-if(this.facing===-1)c.scale(-1,1);
-c.rotate(this.tilt);
-const r=this.range*0.6,a0=this.ca-this.span,a1=this.ca+this.span;
-// filled crescent sweep (Dead Cells-style bright ribbon)
+const sx=this.x-cam.x,sy=this.y-cam.y,a=U.clamp(this.life/this.ml,0,1);
+// the ribbon expands fast then fades: sweep drives geometry, a drives opacity
+const sweep=1-Math.pow(a,1.7);
+c.save();c.translate(sx,sy);if(this.facing===-1)c.scale(-1,1);c.rotate(this.tilt);
 c.globalCompositeOperation='lighter';
-const grd=c.createRadialGradient(0,0,r*0.35,0,0,r*1.15);grd.addColorStop(0,'rgba(255,255,255,0)');grd.addColorStop(0.7,this.color);grd.addColorStop(1,'rgba(255,255,255,0)');
-c.globalAlpha=a*0.55;c.fillStyle=grd;
-c.beginPath();c.arc(0,0,r*(0.55+ease*0.55),a0,a1);c.arc(0,0,r*0.35,a1,a0,true);c.closePath();c.fill();
-// bright leading edge
-c.globalAlpha=a*0.85;c.strokeStyle=this.color;c.shadowColor=this.color;c.shadowBlur=14*a;c.lineWidth=(3+this.girth)*a;
-c.beginPath();c.arc(0,0,r*(0.6+ease*0.5),a0,a1);c.stroke();
-c.lineWidth=1.6*a*this.girth;c.strokeStyle='#fff';c.globalAlpha=a*0.6;
-c.beginPath();c.arc(0,0,r*(0.5+ease*0.5),a0*0.9,a1*0.9);c.stroke();
-c.shadowBlur=0;c.globalCompositeOperation='source-over';c.restore();
+const R=this.range*0.88;
+if(this.shape==='stab'){
+  // ---- IMPALE: a lance of compressed light with a shock ring at the tip ----
+  const len=this.range*(0.72+sweep*0.62),hw=5.2*a;
+  const g=linGrad(c,'stab',0,0,len,0,[[0,'rgba(255,255,255,0)'],[0.25,this.color],[0.8,'#ffffff'],[1,'rgba(255,255,255,0)']]);
+  c.globalAlpha=a*0.75;c.fillStyle=g;
+  c.beginPath();c.moveTo(0,-hw*0.55);c.lineTo(len*0.7,-hw);c.lineTo(len,0);c.lineTo(len*0.7,hw);c.lineTo(0,hw*0.55);c.closePath();c.fill();
+  c.globalAlpha=a*0.95;c.fillStyle='#fff';
+  c.beginPath();c.moveTo(2,-1.3*a);c.lineTo(len*0.92,0);c.lineTo(2,1.3*a);c.closePath();c.fill();
+  // tip shock ring punching outward
+  c.globalAlpha=a*a*0.5;c.strokeStyle=this.color;c.lineWidth=2.4*a;
+  c.beginPath();c.ellipse(len*0.9,0,6+sweep*16,12+sweep*22,0,0,Math.PI*2);c.stroke();
+}else{
+  // ---- ARC / RING: a tapered crescent ribbon swept along the blade's path ----
+  const cd=COMBO[this.step],full=this.shape==='ring';
+  const a0=full?-Math.PI*1.15:cd.arc[0]*0.86,a1=full?Math.PI*0.62:cd.arc[1]*0.86;
+  const steps=full?26:16;
+  // Outer glow ribbon: width tapers from fat at the leading edge to nothing at the tail, which is
+  // what sells "a blade passed through here" instead of a uniform pie slice.
+  const band=(rMul,widthMul,col,alpha)=>{
+    c.globalAlpha=alpha;c.fillStyle=col;c.beginPath();
+    for(let i=0;i<=steps;i++){const t=i/steps,ang=a0+(a1-a0)*t;
+      const taper=Math.sin(Math.PI*Math.pow(t,0.72));            // fat at the head, thin at the tail
+      const rr=R*(0.42+sweep*0.58)*rMul*(0.86+0.14*t);
+      c.lineTo(Math.cos(ang)*(rr+taper*widthMul),Math.sin(ang)*(rr+taper*widthMul));}
+    for(let i=steps;i>=0;i--){const t=i/steps,ang=a0+(a1-a0)*t;
+      const taper=Math.sin(Math.PI*Math.pow(t,0.72));
+      const rr=R*(0.42+sweep*0.58)*rMul*(0.86+0.14*t);
+      c.lineTo(Math.cos(ang)*(rr-taper*widthMul*0.75),Math.sin(ang)*(rr-taper*widthMul*0.75));}
+    c.closePath();c.fill();};
+  band(1.08,9.0*a,this.color,a*0.20);            // soft halo
+  band(1.00,4.4*a,this.color,a*0.46);            // body of the ribbon
+  band(0.98,1.2*a,'#ffffff',a*0.62);             // white-hot core
+  // trailing wisps peeling off the tail of the sweep
+  c.globalAlpha=a*0.35;c.strokeStyle=this.color;c.lineWidth=1.1;
+  for(let k=0;k<3;k++){const t=0.08+k*0.11,ang=a0+(a1-a0)*t,rr=R*(0.42+sweep*0.58);
+    c.beginPath();c.moveTo(Math.cos(ang)*rr*0.88,Math.sin(ang)*rr*0.88);
+    c.lineTo(Math.cos(ang-0.18)*rr*(1.05+sweep*0.2),Math.sin(ang-0.18)*rr*(1.05+sweep*0.2));c.stroke();}
+  if(full){
+    // Moonfall's expanding ground ring — the visual promise that this beat hits everything around you
+    c.globalAlpha=a*a*0.55;c.strokeStyle='#dff4ff';c.lineWidth=3*a;
+    c.beginPath();c.ellipse(0,this.range*0.34,R*(0.5+sweep*1.25),R*(0.16+sweep*0.4),0,0,Math.PI*2);c.stroke();
+  }
+}
+// leading-edge sparks: tiny elongated streaks flung along the sweep direction
+c.globalAlpha=a*0.9;c.fillStyle='#ffffff';
+for(const s of this.sp){const cd=COMBO[this.step];
+  const ang=this.shape==='stab'?s.a*0.22:(cd.arc[0]+(cd.arc[1]-cd.arc[0])*(0.55+s.a*0.42));
+  const rr=(this.shape==='stab'?this.range*(0.8+sweep*0.5):R*(0.5+sweep*0.72))*s.r;
+  const px=Math.cos(ang)*rr,py=Math.sin(ang)*rr;
+  c.save();c.translate(px,py);c.rotate(ang+Math.PI/2);
+  c.fillRect(-s.sz*0.35,-s.sz*s.sk*(1+sweep*2.4),s.sz*0.7,s.sz*s.sk*(2+sweep*4.8));c.restore();}
+c.globalCompositeOperation='source-over';c.globalAlpha=1;c.restore();
 }
 }
 
@@ -863,21 +968,36 @@ else if(this.type==='elite'){this.updateElite(world,player,game,see,dx,dy,dist,s
 else{
 if(see){this.ai.saw=true;this.facing=Math.sign(dx)||1;
 if(this.type==='zombie'&&this.hasLunge&&dist<(this.variant==='lunger'?100:60)&&dist>25&&this.ac<=0&&this.gr){this.vx=Math.sign(dx)*this.spd*(this.variant==='lunger'?4.6:4);this.vy=this.variant==='lunger'?-3:-4;this.gr=false;this.ac=this.variant==='lunger'?42:80;if(this.variant==='lunger')game.particles.emit(this.x+this.w/2,this.y+this.h,6,{color:'#f66',size:2.5,life:12,glow:true,gravity:0.05,vxMin:-2,vxMax:2,vyMin:-1,vyMax:0.5});}
-else if(dist>40){this.vx=U.lerp(this.vx,Math.sign(dx)*this.spd,.1);}
-else if(this.ac<=0){const r=35;const ab={x:this.facing===1?this.x+this.w:this.x-r,y:this.y,w:r,h:this.h};if(U.rc(ab,{x:player.x,y:player.y,w:player.w,h:player.h})){if(player.inv<=0&&!player.rl)game.playerTakeDmg(this.dmg,Math.sign(player.x-this.x));}this.ac=60;}
+else if(this.swingT>0){
+  // ---- TELEGRAPHED SWIPE ----
+  // A hit that lands the instant you enter range is unreadable; the player can only react to
+  // motion they can see coming. So the attack is split into a visible rear-back and a commit
+  // frame, and the body is braced (near-zero drift) through the wind-up so the pose reads clearly.
+  this.swingT-=s;this.vx=U.app(this.vx,0,0.25,s);
+  if(!this.swingHit&&this.swingT<=this.swingMax*0.42){this.swingHit=true;
+    const r=38;const ab={x:this.facing===1?this.x+this.w-4:this.x-r+4,y:this.y+2,w:r,h:this.h-4};
+    this.vx+=this.facing*2.6;
+    if(U.rc(ab,{x:player.x,y:player.y,w:player.w,h:player.h})&&player.inv<=0&&!player.rl)game.playerTakeDmg(this.dmg,Math.sign(player.x-this.x)||this.facing);
+    game.particles.emit(this.x+this.w/2+this.facing*16,this.y+this.h*0.45,5,{color:'#d8c8a0',size:2,life:10,glow:false,gravity:0.05,friction:0.86,vxMin:this.facing*1,vxMax:this.facing*5,vyMin:-1.5,vyMax:1.5});}
+  if(this.swingT<=0)this.ac=this.buffed>0?46:74;
+}
+else if(dist>40){this.vx=U.app(this.vx,Math.sign(dx)*this.spd,0.12,s);}
+else if(this.ac<=0){this.swingMax=this.buffed>0?20:26;this.swingT=this.swingMax;this.swingHit=false;this.facing=Math.sign(dx)||this.facing;SFX.playTone(150,0.06,'square',0.05);}
 // chase downward: drop through a one-way platform we're standing on to follow the player below
 if(dy>44&&this.gr&&this.dropT<=0){const bx=Math.floor((this.x+this.w/2)/32),by=Math.floor((this.y+this.h+2)/32);if(world.tiles[by]&&world.tiles[by][bx]===2){this.dropT=8;this.vy=Math.max(this.vy,1.5);}}
 // small hop up toward a player who is above us
 if(dy<-50&&this.gr&&U.ch(.03*s)){this.vy=-9;this.gr=false;}
 }else{
 // ---- wander: amble, pause and look around; turn back at ledge edges so we don't idly fall ----
+this.swingT=0;   // losing the player abandons any wind-up in progress
 if(this.ai.timer<=0){const r=Math.random();this.ai.dir=r<0.3?0:(U.ch(0.5)?1:-1);this.ai.timer=U.ri(45,170);}
 if(this.ai.dir!==0){this.facing=this.ai.dir;const ahead=this.facing===1?this.x+this.w+3:this.x-3,ftx=Math.floor(ahead/32),fty=Math.floor((this.y+this.h+5)/32);const groundAhead=world.isSolid(ftx,fty)||(world.tiles[fty]&&world.tiles[fty][ftx]===2);if(this.gr&&!groundAhead){this.ai.dir*=-1;this.facing=this.ai.dir;}}
-this.vx=U.lerp(this.vx,this.ai.dir*this.spd*.32,.12);}
-this.vy+=.5*s;this.physGround(world,s,game);
+this.vx=U.app(this.vx,this.ai.dir*this.spd*.32,.13,s);}
+this.vy+=(this.vy>0?0.62:0.48)*s;this.physGround(world,s,game);
 }
 }
-this.facing=this.vx>.1?1:this.vx<-.1?-1:this.facing;
+// Facing follows motion only while actually moving; a braced wind-up must not flip mid-swing.
+if(!(this.swingT>0))this.facing=this.vx>.1?1:this.vx<-.1?-1:this.facing;
 }
 updateElite(world,player,game,see,dx,dy,dist,s){
 switch(this.elitePhase){
@@ -1042,13 +1162,22 @@ else if(t.type===1){if(this.vy>0){this.y=t.y-this.h;this.gr=true;this.vy=0;}else
 else if(t.type===2){if(this.vy>0&&prevY+this.h<=t.y+2&&!(this.dropT>0)){this.y=t.y-this.h;this.gr=true;this.vy=0;}}}
 if(game)for(const at of game.arrowTraps){const atb={x:at.x,y:at.y,w:at.w,h:at.h};if(!U.rc({x:this.x,y:this.y,w:this.w,h:this.h},atb))continue;if(this.vy>0&&prevY+this.h<=atb.y+4){this.y=atb.y-this.h;this.gr=true;this.vy=0;}else if(this.vy<0){this.y=atb.y+atb.h;this.vy=0;}}
 if(this._onIce){this.vx*=Math.pow(0.995,s);}}
-hit(d,kb,ku){if(this.buffed>0)d=Math.ceil(d*0.6);if(this.boss&&this.vuln)d=Math.ceil(d*1.6);this.hp-=d;this.hf=10;if(this.boss){this.st=Math.max(this.st,2);}else{this.st=this.buffed>0?9:15;this.vx=kb*6;if(!this.flying)this.vy=ku?-(3+ku):-3;}if(this.hp<=0)this.alive=false;}
+// Being struck interrupts a wind-up. Without this the swing state would survive the stagger and
+// the enemy would resume mid-animation — or, worse, stay frozen facing the wrong way forever.
+hit(d,kb,ku){this.swingT=0;if(this.buffed>0)d=Math.ceil(d*0.6);if(this.boss&&this.vuln)d=Math.ceil(d*1.6);this.hp-=d;this.hf=10;if(this.boss){this.st=Math.max(this.st,2);}else{this.st=this.buffed>0?9:15;this.vx=kb*6;if(!this.flying)this.vy=ku?-(3+ku):-3;}if(this.hp<=0)this.alive=false;}
 draw(c,cam){
 const x=Math.round(this.x-cam.x),y=Math.round(this.y-cam.y),w=this.w,h=this.h,d=this.facing;
 c.save();c.translate(x+w/2,y+h/2);if(d===-1)c.scale(-1,1);
 // empowered aura on buffed allies
 if(this.buffed>0&&!this.buffer){const bp=0.4+Math.sin(Date.now()/120+this.x)*0.2;c.save();c.globalCompositeOperation='lighter';halo(c,0,0,w*0.9,'#ffc846',bp*0.5);c.restore();}
 if(this.hf>0)c.globalAlpha=.5+Math.sin(this.hf*5)*.5;
+// ---- SWIPE POSE: coil back, then whip forward ----
+// The same curve that drives the hitbox drives the body, so what the player reads is exactly what
+// will hit them. Coiling also scales the silhouette slightly, which makes the tell visible even at
+// the edge of the screen where fine detail is lost.
+if(this.swingT>0){const q=1-this.swingT/this.swingMax,e=q<0.42?-(q/0.42):Math.pow((q-0.42)/0.58,0.5);
+ c.translate(e*7,-Math.abs(e)*1.5);c.rotate(e*0.20);c.scale(1+e*0.05,1-e*0.04);
+ if(e<-0.5){c.save();c.globalCompositeOperation='lighter';halo(c,this.w*0.3,0,this.w*0.85,'#ff9060',(-e-0.5)*0.5);c.restore();}}
 const b=Math.sin(Date.now()/250+this.x)*1;
 if(this.type==='elite'&&(this.elitePhase==='leap'||this.elitePhase==='slam'||this.elitePhase==='sweep')){c.save();c.globalCompositeOperation='lighter';const ap=0.5+Math.sin(Date.now()/60)*0.3;halo(c,0,0,w*1.05,'#ff781e',ap*0.5);c.restore();}
 if(this.type==='elite'&&(this.isWindingUp||this.elitePhase==='dash')){
@@ -1067,9 +1196,13 @@ c.fillStyle='#243018';c.save();c.translate(-3,h/2-10+b);c.rotate(step*0.05);c.fi
 c.fillStyle='#243018';c.save();c.translate(4,h/2-10+b);c.rotate(-step*0.05);c.fillRect(-2.5,0,5,11);c.fillStyle='#182208';c.fillRect(-3,10,6,3);c.restore();
 // back clawed arm hanging
 c.save();c.translate(-w/2+3,-h/2+12+b);c.rotate(0.35+Math.sin(t9/300)*0.1);c.fillStyle='#3a4a24';c.fillRect(-2,0,4,12);c.fillStyle='#e2ddc0';for(let k=-1;k<=1;k++){c.beginPath();c.moveTo(-1.5+k*2,12);c.lineTo(-1.5+k*2,16);c.lineTo(-0.5+k*2,12);c.closePath();c.fill();}c.restore();
-// hunched rotting torso
-c.fillStyle=linGrad(c,'zg'+h,0,-h/2,0,h/2,[[0,'#566e38'],[.55,'#3f5227'],[1,'#2b3a1a']]);
+// hunched rotting torso — top-lit, with a deep core shadow so the mass reads as round
+c.fillStyle=linGrad(c,'zg2'+h,0,-h/2,0,h/2,[[0,'#7a9349'],[.42,'#41552a'],[.78,'#28371a'],[1,'#33421f']]);
 c.beginPath();c.moveTo(-w/2+3,-h/2+8+b);c.lineTo(w/2-1,-h/2+9+b);c.lineTo(w/2-3,h/2-9+b);c.quadraticCurveTo(0,h/2-6+b,-w/2+3,h/2-9+b);c.closePath();c.fill();
+// rim light down the leading edge and a shadow down the trailing one — the cheapest way to lift a
+// flat fill off the background without redrawing the silhouette into a buffer
+c.fillStyle='rgba(200,235,150,0.34)';c.fillRect(w/2-3,-h/2+10+b,1.5,h-20);
+c.fillStyle='rgba(0,0,0,0.34)';c.fillRect(-w/2+3,-h/2+10+b,1.6,h-20);
 // ragged torn hem
 c.fillStyle='#2b3a1a';for(let i=0;i<4;i++){const hx=-w/2+3+i*((w-6)/4);c.beginPath();c.moveTo(hx,h/2-11+b);c.lineTo(hx+((w-6)/8),h/2-6+b);c.lineTo(hx+((w-6)/4),h/2-11+b);c.closePath();c.fill();}
 // gash with exposed ribs
@@ -1078,8 +1211,10 @@ c.fillStyle='#3a1418';c.beginPath();c.ellipse(1,-h/2+18+b,4.5,6,0,0,Math.PI*2);c
 c.fillStyle='rgba(18,28,8,0.5)';c.beginPath();c.arc(-4,-h/2+23+b,2.4,0,Math.PI*2);c.fill();c.beginPath();c.arc(5,-h/2+27+b,1.8,0,Math.PI*2);c.fill();
 // front reaching clawed arm
 c.save();c.translate(w/2-4,-h/2+11+b);c.rotate(0.7+Math.sin(t9/200)*0.2);c.fillStyle='#4a5c2e';c.fillRect(0,-2.5,13,5);c.fillStyle='#3a4a24';c.fillRect(11,-3,4,6);c.fillStyle='#e8e2c4';for(let k=-1;k<=1;k++){c.beginPath();c.moveTo(15,k*2.5);c.lineTo(21,k*2.5-1);c.lineTo(15,k*2.5+1.5);c.closePath();c.fill();}c.restore();
-// misshapen head
-c.fillStyle='#5c703c';c.beginPath();c.moveTo(-5,-h/2+b);c.quadraticCurveTo(-6,-h/2-6+b,1,-h/2-6+b);c.quadraticCurveTo(8,-h/2-6+b,7,-h/2+b);c.lineTo(6,-h/2+10+b);c.lineTo(-4,-h/2+10+b);c.closePath();c.fill();
+// misshapen head — a lit dome falling into shadow at the jaw
+c.fillStyle=linGrad(c,'zh'+h,0,-h/2-6,0,-h/2+10,[[0,'#7d9553'],[0.55,'#57693a'],[1,'#3c4a28']]);
+c.beginPath();c.moveTo(-5,-h/2+b);c.quadraticCurveTo(-6,-h/2-6+b,1,-h/2-6+b);c.quadraticCurveTo(8,-h/2-6+b,7,-h/2+b);c.lineTo(6,-h/2+10+b);c.lineTo(-4,-h/2+10+b);c.closePath();c.fill();
+c.fillStyle='rgba(210,240,170,0.4)';c.fillRect(5.6,-h/2-2+b,1.3,10);
 c.fillStyle='#cfc9ab';c.beginPath();c.ellipse(-3,-h/2+1+b,2.4,3,0,0,Math.PI*2);c.fill();
 // sunken glowing eyes
 c.fillStyle='#0e1408';c.fillRect(-3,-h/2+2+b,3.5,3);c.fillRect(3,-h/2+2+b,3.5,3);
@@ -1088,11 +1223,46 @@ c.save();c.globalCompositeOperation='lighter';c.fillStyle='#9fff3a';c.shadowColo
 const jaw=1+Math.sin(t9/240+this.x)*0.7;c.fillStyle='#160c06';c.beginPath();c.ellipse(1.5,-h/2+8+b,3.4,jaw+1.5,0,0,Math.PI*2);c.fill();
 c.fillStyle='#d8d2b0';for(let k=0;k<4;k++){const tx3=-1.5+k*2;c.beginPath();c.moveTo(tx3,-h/2+6.6+b);c.lineTo(tx3+0.8,-h/2+8+b);c.lineTo(tx3+1.6,-h/2+6.6+b);c.closePath();c.fill();}
 if((this.x|0)%2===0){c.fillStyle='rgba(150,200,80,0.55)';c.fillRect(1,-h/2+9.5+b,1.1,2.5+Math.sin(t9/300)*1.4);}
-}else if(this.type==='bat'){const wp=Math.sin(Date.now()/50+this.x)*0.9;c.save();c.rotate(wp);c.fillStyle='#3a1a4a';c.beginPath();c.moveTo(-2,0);c.lineTo(-w/2-7,-5);c.lineTo(-w/2-2,-1);c.lineTo(-w/2-6,4);c.closePath();c.fill();c.fillStyle='#5a2a6a';c.beginPath();c.moveTo(-2,0);c.lineTo(-w/2-4,-2);c.lineTo(-w/2,2);c.closePath();c.fill();c.restore();c.save();c.rotate(-wp);c.fillStyle='#3a1a4a';c.beginPath();c.moveTo(2,0);c.lineTo(w/2+7,-5);c.lineTo(w/2+2,-1);c.lineTo(w/2+6,4);c.closePath();c.fill();c.fillStyle='#5a2a6a';c.beginPath();c.moveTo(2,0);c.lineTo(w/2+4,-2);c.lineTo(w/2,2);c.closePath();c.fill();c.restore();c.fillStyle='#4a2a5a';c.beginPath();c.arc(0,0,5,0,Math.PI*2);c.fill();c.fillStyle='#2a152f';c.beginPath();c.moveTo(-4,-4);c.lineTo(-2,-7);c.lineTo(-1,-4);c.fill();c.beginPath();c.moveTo(4,-4);c.lineTo(2,-7);c.lineTo(1,-4);c.fill();c.fillStyle='#ff2266';c.shadowColor='#f06';c.shadowBlur=this.isDiving?11:5;c.fillRect(-2.5,-2,2,2.5);c.fillRect(1,-2,2,2.5);c.shadowBlur=0;c.fillStyle='#fff';c.fillRect(-1.5,3,1,2);c.fillRect(1,3,1,2);if(this.isDiving){c.fillStyle='rgba(255,0,102,0.5)';c.fillRect(-7,-8,14,2);}
+}else if(this.type==='bat'){
+// ---- membranous wings that actually fold ----
+// The wing beat drives both rotation *and* a horizontal squash, because a real wing foreshortens
+// as it sweeps toward the viewer. Two-tone membrane with visible finger bones turns a flat triangle
+// into something that reads as skin stretched over a hand.
+const bt=Date.now()/(this.isDiving?36:64)+this.x;const wp=Math.sin(bt)*0.95,fold=0.45+Math.abs(Math.cos(bt))*0.55;
+const wing=(sgn)=>{c.save();c.rotate(wp*sgn);c.scale(fold,1);
+ const X=(v)=>sgn*v;
+ // membrane
+ c.fillStyle='#331546';c.beginPath();c.moveTo(X(2),-1);
+ c.quadraticCurveTo(X(w/2+4),-9,X(w/2+11),-4);
+ c.lineTo(X(w/2+6),0);c.lineTo(X(w/2+10),5);
+ c.quadraticCurveTo(X(w/2+2),4,X(2),2);c.closePath();c.fill();
+ // lit upper membrane
+ c.fillStyle='#5c2b74';c.beginPath();c.moveTo(X(2),-1);
+ c.quadraticCurveTo(X(w/2+2),-7,X(w/2+8),-4);c.lineTo(X(w/2+3),-0.5);c.closePath();c.fill();
+ // finger bones
+ c.strokeStyle='#7a4a94';c.lineWidth=0.9;
+ c.beginPath();c.moveTo(X(2),0);c.lineTo(X(w/2+10),-4);c.moveTo(X(2),0);c.lineTo(X(w/2+6),0.4);c.moveTo(X(2),0);c.lineTo(X(w/2+9),5);c.stroke();
+ c.restore();};
+wing(-1);wing(1);
+// furry body with a lit crown and a dark belly
+c.fillStyle=linGrad(c,'batb',0,-6,0,6,[[0,'#6d4183'],[0.5,'#43254f'],[1,'#25142c']]);c.beginPath();c.ellipse(0,0,5,5.6,0,0,Math.PI*2);c.fill();
+c.fillStyle='#8a5aa4';c.beginPath();c.ellipse(0,-2.6,3.4,2.2,0,0,Math.PI*2);c.fill();
+// ears
+c.fillStyle='#2a152f';c.beginPath();c.moveTo(-4,-4);c.lineTo(-2.4,-8.4);c.lineTo(-0.8,-4);c.fill();c.beginPath();c.moveTo(4,-4);c.lineTo(2.4,-8.4);c.lineTo(0.8,-4);c.fill();
+c.fillStyle='#5c3070';c.beginPath();c.moveTo(-3.4,-4.4);c.lineTo(-2.5,-7.2);c.lineTo(-1.6,-4.4);c.fill();c.beginPath();c.moveTo(3.4,-4.4);c.lineTo(2.5,-7.2);c.lineTo(1.6,-4.4);c.fill();
+// eyes burn brighter the instant it commits to a dive — the tell that it is coming for you
+c.save();c.globalCompositeOperation='lighter';c.fillStyle=this.isDiving?'#ff4a7a':'#ff2266';c.shadowColor='#f06';c.shadowBlur=this.isDiving?12:6;
+c.beginPath();c.ellipse(-2,-1.4,1.3,1.5,0,0,Math.PI*2);c.fill();c.beginPath();c.ellipse(2,-1.4,1.3,1.5,0,0,Math.PI*2);c.fill();c.restore();c.shadowBlur=0;
+c.fillStyle='#fff';c.fillRect(-1.6,3,1.1,2.2);c.fillRect(0.9,3,1.1,2.2);
+if(this.isDiving){c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.45;c.fillStyle='#ff2266';
+ for(let k=1;k<4;k++){c.globalAlpha=0.3/k;c.beginPath();c.ellipse(0,-k*5,5-k*0.8,5.6-k,0,0,Math.PI*2);c.fill();}c.restore();}
 }else if(this.type==='skeleton'){
+// dark cavity behind the ribs, so the cage reads as an empty chest rather than a flat decal
+c.fillStyle='rgba(6,10,6,0.75)';c.beginPath();c.ellipse(0.5,-h/2+16+b,w/2-2.5,9,0,0,Math.PI*2);c.fill();
 // spine + curved rib cage
 c.fillStyle='#d8d8c0';c.fillRect(-1,-h/2+10+b,2.5,h-18);
-c.strokeStyle='#d4d4bc';c.lineWidth=1.6;for(let ri=0;ri<4;ri++){const ry=-h/2+12+b+ri*4.2;c.beginPath();c.moveTo(0,ry);c.quadraticCurveTo(-w/2+2,ry+1.5,-w/2+3.5,ry+4);c.moveTo(0,ry);c.quadraticCurveTo(w/2-2,ry+1.5,w/2-3.5,ry+4);c.stroke();}
+c.strokeStyle='#8e8e78';c.lineWidth=2.4;for(let ri=0;ri<4;ri++){const ry=-h/2+12.6+b+ri*4.2;c.beginPath();c.moveTo(0,ry);c.quadraticCurveTo(-w/2+2,ry+1.5,-w/2+3.5,ry+4);c.moveTo(0,ry);c.quadraticCurveTo(w/2-2,ry+1.5,w/2-3.5,ry+4);c.stroke();}
+c.strokeStyle='#eaeada';c.lineWidth=1.5;for(let ri=0;ri<4;ri++){const ry=-h/2+12+b+ri*4.2;c.beginPath();c.moveTo(0,ry);c.quadraticCurveTo(-w/2+2,ry+1.5,-w/2+3.5,ry+4);c.moveTo(0,ry);c.quadraticCurveTo(w/2-2,ry+1.5,w/2-3.5,ry+4);c.stroke();}
 c.fillStyle='#c8c8b0';c.fillRect(-4,h/2-11+b,8,3);
 c.fillStyle='#e2e2cc';c.beginPath();c.ellipse(-w/2+4.5,-h/2+10+b,3,2.4,0,0,Math.PI*2);c.fill();c.beginPath();c.ellipse(w/2-4.5,-h/2+10+b,3,2.4,0,0,Math.PI*2);c.fill();
 // skull: domed cranium + jaw
@@ -1107,10 +1277,47 @@ c.save();c.globalCompositeOperation='lighter';c.fillStyle='#ff3020';c.shadowColo
 c.fillStyle='#0a0a08';c.beginPath();c.moveTo(1,-h/2+4+b);c.lineTo(2,-h/2+7+b);c.lineTo(0,-h/2+7+b);c.closePath();c.fill();
 c.fillStyle='#0a0a08';c.fillRect(-4,-h/2+8.6+b,10,0.9);c.fillStyle='#d6d6be';for(let k=0;k<5;k++)c.fillRect(-3.6+k*2,-h/2+8+b,1.2,2.2);
 c.save();const dp=this.isDrawing?this.drawTimer/this.maxDraw:0;c.translate(4,0);c.rotate(-.3);c.strokeStyle='#886633';c.lineWidth=2;c.beginPath();c.arc(8,0,14,-.9,.9);c.stroke();const pb=dp*8;c.strokeStyle='#aaa';c.lineWidth=1;c.beginPath();c.moveTo(8+Math.cos(-.9)*14,Math.sin(-.9)*14);if(this.isDrawing)c.lineTo(8-pb,0);c.lineTo(8+Math.cos(.9)*14,Math.sin(.9)*14);c.stroke();if(this.isDrawing){c.fillStyle='#aa8866';c.save();c.translate(8-pb,0);c.fillRect(0,-1,16,2);c.fillStyle='#888';c.beginPath();c.moveTo(16,-2);c.lineTo(19,0);c.lineTo(16,2);c.closePath();c.fill();c.restore();}c.restore();c.fillStyle='#aaa988';c.fillRect(-3,h/2-8,2,8);c.fillRect(3,h/2-8,2,8);
-}else if(this.type==='elite'){c.fillStyle='#2a0a0a';c.fillRect(-4,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.shadowColor='#ff4400';c.shadowBlur=12;c.fillStyle=linGrad(c,'eg'+h,0,-h/2,0,h/2,[[0,'#a01818'],[1,'#5a0c0c']]);c.fillRect(-w/2+1,-h/2+4+b,w-2,h-11);c.shadowBlur=0;c.strokeStyle='#ff6a1a';c.lineWidth=1;c.beginPath();c.moveTo(-4,-h/2+9+b);c.lineTo(-1,-h/2+17+b);c.lineTo(3,-h/2+14+b);c.stroke();c.fillStyle='#7a1414';c.fillRect(-6,-h/2-2+b,14,12);
+}else if(this.type==='elite'){c.fillStyle='#2a0a0a';c.fillRect(-4,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.shadowColor='#ff4400';c.shadowBlur=6;
+// ---- ARMOURED TORSO ----
+// Shaped rather than rectangular: broad at the shoulders, tapering to the waist. Blackened iron
+// with only a narrow hot rim, so the figure reads as heavy armour lit by its own inner furnace
+// instead of a slab of flat red — saturation is spent on the glow, not the plate.
+c.fillStyle=linGrad(c,'eg3'+h,0,-h/2,0,h/2,[[0,'#6e2018'],[0.34,'#48100e'],[0.74,'#260706'],[1,'#3a0d0a']]);
+c.beginPath();c.moveTo(-w/2-1,-h/2+6+b);c.lineTo(w/2+1,-h/2+6+b);c.lineTo(w/2-2,h/2-9+b);
+c.quadraticCurveTo(0,h/2-6+b,-w/2+2,h/2-9+b);c.closePath();c.fill();c.shadowBlur=0;
+// molten seams glowing between the plates
+c.save();c.globalCompositeOperation='lighter';c.fillStyle='rgba(255,110,30,0.42)';
+c.fillRect(-w/2+2,-h/2+13+b,w-4,1.3);c.fillRect(-w/2+2.5,-h/2+22+b,w-5,1.1);c.restore();
+c.fillStyle='rgba(0,0,0,0.42)';c.fillRect(-w/2+2,-h/2+14.3+b,w-4,1.4);c.fillRect(-w/2+2.5,-h/2+23.1+b,w-5,1.2);
+// rim light on the leading edge, deep shadow on the trailing one
+c.fillStyle='rgba(255,150,80,0.5)';c.fillRect(w/2-3,-h/2+8+b,1.7,h-19);
+c.fillStyle='rgba(0,0,0,0.5)';c.fillRect(-w/2+1,-h/2+8+b,1.8,h-19);
+// pauldron over the shoulder + rivets
+c.fillStyle='#5c1a14';c.beginPath();c.ellipse(0,-h/2+8+b,w/2+1.5,5,0,Math.PI,0);c.fill();
+c.fillStyle='#8a2d20';c.beginPath();c.ellipse(0.5,-h/2+7+b,w/2-1,2.6,0,Math.PI,0);c.fill();
+c.fillStyle='#c8763a';for(let rv=0;rv<3;rv++){c.beginPath();c.arc(-w/2+4,-h/2+12+b+rv*8,1,0,Math.PI*2);c.fill();}c.strokeStyle='#ff6a1a';c.lineWidth=1;c.beginPath();c.moveTo(-4,-h/2+9+b);c.lineTo(-1,-h/2+17+b);c.lineTo(3,-h/2+14+b);c.stroke();c.fillStyle='#7a1414';c.fillRect(-6,-h/2-2+b,14,12);
 // curved demon horns
 c.strokeStyle='#1a0606';c.lineWidth=3.5;c.lineCap='round';c.beginPath();c.moveTo(-5,-h/2-1+b);c.quadraticCurveTo(-13,-h/2-6+b,-11,-h/2-14+b);c.moveTo(7,-h/2-1+b);c.quadraticCurveTo(15,-h/2-6+b,13,-h/2-14+b);c.stroke();c.strokeStyle='#3a1010';c.lineWidth=1.4;c.beginPath();c.moveTo(-5,-h/2-1+b);c.quadraticCurveTo(-13,-h/2-6+b,-11,-h/2-14+b);c.moveTo(7,-h/2-1+b);c.quadraticCurveTo(15,-h/2-6+b,13,-h/2-14+b);c.stroke();c.lineCap='butt';
-c.fillStyle='#3a0808';c.beginPath();c.moveTo(-6,-h/2-2+b);c.lineTo(-10,-h/2-9+b);c.lineTo(-4,-h/2-2+b);c.fill();c.beginPath();c.moveTo(8,-h/2-2+b);c.lineTo(12,-h/2-9+b);c.lineTo(6,-h/2-2+b);c.fill();c.fillStyle='#ffcc22';c.shadowColor='#ff6600';c.shadowBlur=8;c.fillRect(-2,-h/2+3+b,3,2);c.fillRect(5,-h/2+3+b,3,2);c.shadowBlur=0;c.save();c.translate(w/2-2,0+b);c.rotate(-0.5);c.fillStyle='#8a2a2a';c.fillRect(0,-2,10,4);c.fillStyle='#dde';c.fillRect(8,-4,17,3);c.fillStyle='#99a';c.fillRect(8,1,17,3);c.restore();}else if(this.type==='caster'){const chg=this.castPhase==='charge',fl=chg?(1-this.chargeT/42):0;c.fillStyle=linGrad(c,'cr'+h,0,-h/2,0,h/2,[[0,'#3a1a5a'],[1,'#1e0e30']]);c.beginPath();c.moveTo(-w/2+2,-h/2+8+b);c.lineTo(w/2-2,-h/2+8+b);c.lineTo(w/2+2,h/2+b);c.lineTo(-w/2-2,h/2+b);c.closePath();c.fill();c.fillStyle='#7a40c0';c.fillRect(-w/2,-h/2+8+b,w,2);c.fillStyle='#2a1444';c.beginPath();c.moveTo(-6,-h/2-4+b);c.lineTo(6,-h/2-4+b);c.lineTo(8,-h/2+9+b);c.lineTo(-8,-h/2+9+b);c.closePath();c.fill();c.fillStyle='#e0a0ff';c.shadowColor='#c060ff';c.shadowBlur=8;c.fillRect(-4,-h/2+2+b,2.5,2);c.fillRect(2,-h/2+2+b,2.5,2);c.shadowBlur=0;c.save();c.translate(w/2-2,-2+b);c.fillStyle='#5a3a20';c.fillRect(-1,-14,2.5,26);const oyy=-16;c.globalCompositeOperation='lighter';const orbR=5+fl*4+Math.sin(Date.now()/120)*1;halo(c,0.5,oyy,orbR*2,'#e6aaff',0.95);c.globalAlpha=1;c.fillStyle='#f0d0ff';c.beginPath();c.arc(0.5,oyy,orbR*0.5,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='shield'){const wu=this.isWindingUp?1:0;c.fillStyle='#2a2a34';c.fillRect(-5,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.fillStyle=linGrad(c,'sh'+h,0,-h/2,0,h/2,[[0,'#4a5060'],[1,'#2a2e3a']]);c.fillRect(-w/2+2,-h/2+6+b,w-4,h-13);c.fillStyle='#20242e';c.fillRect(-w/2+2,-h/2+13+b,w-4,1.5);c.fillRect(-w/2+2,-h/2+20+b,w-4,1.5);c.fillStyle='#5a6070';c.fillRect(-5,-h/2-2+b,12,11);c.fillStyle='#0a0a10';c.fillRect(-4,-h/2+2+b,10,3);c.fillStyle='#ff5a3a';c.shadowColor='#f30';c.shadowBlur=5;c.fillRect(-2,-h/2+3+b,2,2);c.fillRect(3,-h/2+3+b,2,2);c.shadowBlur=0;c.fillStyle='#8a2030';c.fillRect(-1,-h/2-6+b,3,6);c.save();c.translate(w/2-1+wu*Math.sin(Date.now()/40)*2,b);c.fillStyle='#7a5230';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(10,-h/2+6);c.lineTo(10,h/2-4);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#4a3016';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(3,-h/2+3);c.lineTo(3,h/2-1);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#9a9aa8';c.fillRect(3,-h/2+5,4,h-9);c.fillStyle='#c0c0cc';c.beginPath();c.arc(5,0,4,0,Math.PI*2);c.fill();c.fillStyle='#6a6a78';c.beginPath();c.arc(5,0,2,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='wisp'){
+c.fillStyle='#3a0808';c.beginPath();c.moveTo(-6,-h/2-2+b);c.lineTo(-10,-h/2-9+b);c.lineTo(-4,-h/2-2+b);c.fill();c.beginPath();c.moveTo(8,-h/2-2+b);c.lineTo(12,-h/2-9+b);c.lineTo(6,-h/2-2+b);c.fill();c.fillStyle='#ffcc22';c.shadowColor='#ff6600';c.shadowBlur=8;c.fillRect(-2,-h/2+3+b,3,2);c.fillRect(5,-h/2+3+b,3,2);c.shadowBlur=0;c.save();c.translate(w/2-2,0+b);c.rotate(-0.5);c.fillStyle='#8a2a2a';c.fillRect(0,-2,10,4);c.fillStyle='#dde';c.fillRect(8,-4,17,3);c.fillStyle='#99a';c.fillRect(8,1,17,3);c.restore();}else if(this.type==='caster'){const chg=this.castPhase==='charge',fl=chg?(1-this.chargeT/42):0;// ---- ROBED CASTER ----
+// Cloth, not a board: the hem flares and ripples, the fabric falls into deep shadow between folds,
+// and the only bright value on the whole figure is the light its own magic throws up under the hood.
+c.fillStyle=linGrad(c,'cr2'+h,0,-h/2,0,h/2,[[0,'#4a2472'],[0.4,'#2a1244'],[0.85,'#150a24'],[1,'#241040']]);
+c.beginPath();c.moveTo(-w/2+2,-h/2+8+b);c.lineTo(w/2-2,-h/2+8+b);
+c.quadraticCurveTo(w/2+4,h/2-8+b,w/2+3,h/2+b);
+// a ragged, uneven hem so the robe ends in cloth rather than a ruled line
+for(let k=4;k>=0;k--){const hx=-w/2-3+(k/4)*(w+6);c.lineTo(hx,h/2+b-((k*7+(this.x|0))%4));}
+c.quadraticCurveTo(-w/2-4,h/2-8+b,-w/2+2,-h/2+8+b);c.closePath();c.fill();
+// vertical fold shadows
+c.fillStyle='rgba(0,0,0,0.30)';for(let k=0;k<3;k++)c.fillRect(-w/2+4+k*(w/3.4),-h/2+11+b,1.6,h-14);
+c.fillStyle='rgba(190,130,255,0.20)';for(let k=0;k<3;k++)c.fillRect(-w/2+5.6+k*(w/3.4),-h/2+11+b,0.9,h-14);
+// shoulder yoke
+c.fillStyle='#7a40c0';c.fillRect(-w/2,-h/2+8+b,w,2);c.fillStyle='#a866f0';c.fillRect(-w/2,-h/2+8+b,w,0.9);
+// hood — a pointed cowl with a black void where the face should be
+c.fillStyle='#2a1444';c.beginPath();c.moveTo(-7,-h/2+10+b);c.quadraticCurveTo(-7,-h/2-8+b,1,-h/2-9+b);
+c.quadraticCurveTo(9,-h/2-8+b,9,-h/2+10+b);c.closePath();c.fill();
+c.fillStyle='#3d1f5e';c.beginPath();c.moveTo(-7,-h/2+10+b);c.quadraticCurveTo(-6,-h/2-6+b,1,-h/2-7+b);c.quadraticCurveTo(3,-h/2-6+b,2,-h/2+10+b);c.closePath();c.fill();
+c.fillStyle='#08040e';c.beginPath();c.ellipse(1,-h/2+3+b,5.2,5.6,0,0,Math.PI*2);c.fill();
+c.fillStyle='#e0a0ff';c.shadowColor='#c060ff';c.shadowBlur=8;c.fillRect(-2.6,-h/2+2+b,2.5,2);c.fillRect(1.8,-h/2+2+b,2.5,2);c.shadowBlur=0;c.save();c.translate(w/2-2,-2+b);c.fillStyle='#5a3a20';c.fillRect(-1,-14,2.5,26);const oyy=-16;c.globalCompositeOperation='lighter';const orbR=5+fl*4+Math.sin(Date.now()/120)*1;halo(c,0.5,oyy,orbR*2,'#e6aaff',0.95);c.globalAlpha=1;c.fillStyle='#f0d0ff';c.beginPath();c.arc(0.5,oyy,orbR*0.5,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='shield'){const wu=this.isWindingUp?1:0;c.fillStyle='#2a2a34';c.fillRect(-5,h/2-9+b,5,9);c.fillRect(2,h/2-9+b,5,9);c.fillStyle=linGrad(c,'sh'+h,0,-h/2,0,h/2,[[0,'#4a5060'],[1,'#2a2e3a']]);c.fillRect(-w/2+2,-h/2+6+b,w-4,h-13);c.fillStyle='#20242e';c.fillRect(-w/2+2,-h/2+13+b,w-4,1.5);c.fillRect(-w/2+2,-h/2+20+b,w-4,1.5);c.fillStyle='#5a6070';c.fillRect(-5,-h/2-2+b,12,11);c.fillStyle='#0a0a10';c.fillRect(-4,-h/2+2+b,10,3);c.fillStyle='#ff5a3a';c.shadowColor='#f30';c.shadowBlur=5;c.fillRect(-2,-h/2+3+b,2,2);c.fillRect(3,-h/2+3+b,2,2);c.shadowBlur=0;c.fillStyle='#8a2030';c.fillRect(-1,-h/2-6+b,3,6);c.save();c.translate(w/2-1+wu*Math.sin(Date.now()/40)*2,b);c.fillStyle='#7a5230';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(10,-h/2+6);c.lineTo(10,h/2-4);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#4a3016';c.beginPath();c.moveTo(0,-h/2+2);c.lineTo(3,-h/2+3);c.lineTo(3,h/2-1);c.lineTo(0,h/2);c.closePath();c.fill();c.fillStyle='#9a9aa8';c.fillRect(3,-h/2+5,4,h-9);c.fillStyle='#c0c0cc';c.beginPath();c.arc(5,0,4,0,Math.PI*2);c.fill();c.fillStyle='#6a6a78';c.beginPath();c.arc(5,0,2,0,Math.PI*2);c.fill();c.restore();}else if(this.type==='wisp'){
 const tw=Date.now(),fl=this.fusing?(this.fuseT%6<3?1:0):0;const pl2=0.7+Math.sin(tw/90+this.x)*0.3;
 c.save();c.globalCompositeOperation='lighter';halo(c,0,0,14*pl2+fl*6,fl?'#ff78ff':'#be82ff',fl?0.95:0.85);c.restore();
 c.fillStyle=fl?'#ffd0ff':'#e0c8ff';c.beginPath();c.arc(0,0,4,0,Math.PI*2);c.fill();
@@ -1244,56 +1451,152 @@ constructor(li){const lvls=getAllLevels();const ld=lvls[li%lvls.length];const td
 // Ice overlays: Set of "tx,ty" strings marking tiles with ice on top
 this.iceOverlays=new Set();(ld.iceOverlays||[]).forEach(o=>this.iceOverlays.add(o.x+','+o.y));
 // Fog of war: coarse 4x4-tile cells the player has seen
-this.explored=new Set();}
+this.explored=new Set();
+this.bakeNoise();}
+// ---- BAKED WEATHERING FIELDS ----
+// Every terrain detail below is driven by coherent noise, and the tilemap never changes, so the
+// fields are evaluated exactly once per level into flat typed arrays instead of being re-sampled
+// for every visible tile on every frame. fBm is dozens of hashes per call and the renderer wants
+// six different fields per tile — baking turns that from the single largest per-frame cost in the
+// terrain pass into an array lookup, for a few kilobytes of memory on even the largest map.
+bakeNoise(){const n=this.tw*this.th;
+ this.nDamp=new Float32Array(n);this.nWear=new Float32Array(n);this.nMoss=new Float32Array(n);
+ this.nCrack=new Float32Array(n);this.nLush=new Float32Array(n);this.nIvy=new Float32Array(n);this.nDeck=new Float32Array(n);
+ for(let y=0;y<this.th;y++)for(let x=0;x<this.tw;x++){const i=y*this.tw+x,nx=x*0.16,ny=y*0.16;
+  this.nDamp[i]=NZ.warp(nx,ny,11,3);
+  this.nWear[i]=NZ.fbm(nx*1.9,ny*1.9,29,3);
+  this.nMoss[i]=NZ.warp(nx*0.62,ny*0.62,53,3);
+  this.nCrack[i]=NZ.ridge(nx*1.35,ny*1.35,71,2);
+  this.nLush[i]=NZ.warp(x*0.13,y*0.13,53,3);
+  this.nIvy[i]=NZ.warp(nx*0.8+3.1,ny*0.8,89,2);
+  this.nDeck[i]=NZ.fbm(x*0.22,y*0.22,211,3);}}
+nAt(a,x,y){return (x>=0&&y>=0&&x<this.tw&&y<this.th)?a[y*this.tw+x]:0.5;}
 getTilesAround(x,y,w,h){const ts=this.ts,r=[];const sx=Math.max(0,Math.floor(x/ts)-1),ex=Math.min(this.tw-1,Math.floor((x+w)/ts)+1);const sy=Math.max(0,Math.floor(y/ts)-1),ey=Math.min(this.th-1,Math.floor((y+h)/ts)+1);for(let ty=sy;ty<=ey;ty++)for(let tx=sx;tx<=ex;tx++)if(this.tiles[ty]&&this.tiles[ty][tx]>0)r.push({x:tx*ts,y:ty*ts,w:ts,h:ts,type:this.tiles[ty][tx]});return r;}
 isSolid(tx,ty){return ty>=0&&ty<this.th&&tx>=0&&tx<this.tw&&this.tiles[ty][tx]===1;}
-draw(c,cam,vw,vh){vw=vw||canvas.width;vh=vh||canvas.height;const ts=this.ts,sx=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(this.tw-1,Math.floor((cam.x+vw)/ts)+1),sy=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(this.th-1,Math.floor((cam.y+vh)/ts)+1);const cols={dungeon:{w:'#26263c',w2:'#2e2e48',wd:'#15152a',wl:'#3c3c60',gl:'#5a6ad0',p:'#4a4a70'},sewers:{w:'#1a2a1a',w2:'#22361f',wd:'#0c1a0c',wl:'#2e4e2e',gl:'#4a9a4a',p:'#335533'},ramparts:{w:'#33261a',w2:'#40301f',wd:'#241608',wl:'#5a4a3a',gl:'#c07030',p:'#554433'},castle:{w:'#1c2436',w2:'#243048',wd:'#0e1420',wl:'#3a4a66',gl:'#4a7ad0',p:'#2a3450'},crypt:{w:'#241a30',w2:'#2e2240',wd:'#140c1e',wl:'#3e2e56',gl:'#a050e0',p:'#3a2a50'}};const cl=cols[this.theme]||cols.dungeon;for(let ty=sy;ty<=ey;ty++)for(let tx=sx;tx<=ex;tx++){const t=this.tiles[ty]?this.tiles[ty][tx]:0;if(!t)continue;const px=tx*ts-cam.x,py=ty*ts-cam.y;if(t===1){c.fillStyle=cl.w;c.fillRect(px,py,ts,ts);
-// brick coursework: two offset rows with tonal variation
+draw(c,cam,vw,vh){vw=vw||canvas.width;vh=vh||canvas.height;const ts=this.ts,sx=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(this.tw-1,Math.floor((cam.x+vw)/ts)+1),sy=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(this.th-1,Math.floor((cam.y+vh)/ts)+1);// Foreground masonry is deliberately pushed a step warmer and lighter than the background hue.
+// That colour-temperature split — cold receding air, warm nearby stone — is the cheapest and
+// strongest depth cue there is, and it lets the playable surfaces read instantly against the murk.
+const cols={dungeon:{w:'#2b3038',w2:'#363c46',wd:'#161a1f',wl:'#4e5661',gl:'#4fd8b4',p:'#474d56'},sewers:{w:'#222c1e',w2:'#2c3826',wd:'#101809',wl:'#465238',gl:'#66c257',p:'#3b4a33'},ramparts:{w:'#3b2a1a',w2:'#4b3624',wd:'#1f1308',wl:'#6b563f',gl:'#e08a34',p:'#5d4834'},castle:{w:'#212a3a',w2:'#2b374c',wd:'#0f1520',wl:'#455471',gl:'#5aa8e6',p:'#313c56'},crypt:{w:'#292036',w2:'#352947',wd:'#150e1f',wl:'#48375f',gl:'#b264ef',p:'#3f2f57'}};const cl=cols[this.theme]||cols.dungeon;for(let ty=sy;ty<=ey;ty++)for(let tx=sx;tx<=ex;tx++){const t=this.tiles[ty]?this.tiles[ty][tx]:0;if(!t)continue;const px=tx*ts-cam.x,py=ty*ts-cam.y;if(t===1){
+// ============ MASONRY: coherent-noise weathering ============
+// The old renderer chose every detail from an integer hash, which is white noise: neighbouring
+// tiles are statistically independent, so damp, moss and cracks scattered with an unnaturally even
+// density and the low bits of the hash tiled visibly across long walls. Driving the same details
+// from fBm instead makes them vary smoothly over space, so weathering forms *regions* — a damp,
+// mossy stretch beside dry bare stone — which is how real ruins actually read. Sampling is
+// integer-seeded, so a tile always renders identically and nothing shimmers between frames.
+const _ni=ty*this.tw+tx,nx=tx*0.16,ny=ty*0.16;
+const damp=this.nDamp[_ni];                        // wet/dark patches, veiny
+const wear=this.nWear[_ni];                        // fine tonal grain per stone
+const mossN=this.nMoss[_ni];                       // large moss colonies
+const crackN=this.nCrack[_ni];                     // sharp fracture lines
+c.fillStyle=cl.w;c.fillRect(px,py,ts,ts);
+// large-scale tonal drift: whole stretches of wall sit lighter or darker than the base tone
+if(damp>0.56){c.globalAlpha=U.clamp((damp-0.56)*2.0,0,0.5);c.fillStyle=cl.wd;c.fillRect(px,py,ts,ts);c.globalAlpha=1;}
+else if(damp<0.36){c.globalAlpha=U.clamp((0.36-damp)*1.7,0,0.32);c.fillStyle=cl.w2;c.fillRect(px,py,ts,ts);c.globalAlpha=1;}
+// brick coursework: two offset rows, each stone tinted by its own noise sample so no two blocks
+// in a course share a tone (the old version cycled through 3 values and read as a pattern)
 for(let r=0;r<2;r++){const by2=py+r*16,off=r%2?8:0;
-for(let bx2=-8+off;bx2<ts;bx2+=16){const bh2=((tx*53+ty*97+r*31+bx2)&15);if(bh2>=5)continue;
-c.fillStyle=bh2<3?cl.w2:cl.wd;const x0=Math.max(px,px+bx2)+1,x1=Math.min(px+ts,px+bx2+16)-1;if(x1>x0)c.fillRect(x0,by2+1,x1-x0,14);}}
+for(let bx2=-8+off;bx2<ts;bx2+=16){
+const bn=NZ.v2((tx*2+bx2/16)*0.9,(ty*2+r)*0.9,137);
+const x0=Math.max(px,px+bx2)+1,x1=Math.min(px+ts,px+bx2+16)-1;if(x1<=x0)continue;
+c.globalAlpha=0.16+Math.abs(bn-0.5)*0.7;c.fillStyle=bn>0.5?cl.w2:cl.wd;c.fillRect(x0,by2+1,x1-x0,14);
+// each stone gets its own top bevel: a lit lip and a shadowed underside give the wall relief
+c.globalAlpha=0.10;c.fillStyle=cl.wl;c.fillRect(x0,by2+1,x1-x0,1.4);
+c.globalAlpha=0.20;c.fillStyle='#000';c.fillRect(x0,by2+13,x1-x0,1.6);c.globalAlpha=1;}}
 // mortar seams
-c.fillStyle='rgba(0,0,0,0.26)';c.fillRect(px,py+15,ts,1.5);
+c.fillStyle='rgba(0,0,0,0.30)';c.fillRect(px,py+15,ts,1.5);
 c.fillRect(px+16,py,1.5,16);c.fillRect(px+8,py+16,1.5,16);c.fillRect(px+24,py+16,1.5,16);
-// ---- masonry variant: diversify walls (ashlar blocks / heavy cracks / mossy overgrowth) ----
-const bv=(tx*37+ty*61)&3;
-if(bv===1){c.strokeStyle='rgba(0,0,0,0.3)';c.lineWidth=1.5;c.strokeRect(px+1.5,py+1.5,ts-3,ts-3);c.strokeStyle='rgba(255,255,255,0.055)';c.strokeRect(px+2,py+2.5,ts-4,ts-5);}
-else if(bv===2){c.strokeStyle='rgba(0,0,0,0.34)';c.lineWidth=1;c.beginPath();c.moveTo(px+6,py+3);c.lineTo(px+11,py+13);c.lineTo(px+8,py+24);c.moveTo(px+22,py+6);c.lineTo(px+18,py+18);c.lineTo(px+24,py+28);c.stroke();}
-else if(bv===3){c.fillStyle=this.theme==='crypt'?'rgba(120,80,220,0.16)':this.theme==='ramparts'?'rgba(150,170,60,0.16)':'rgba(70,150,90,0.17)';for(let k=0;k<5;k++){const mvx=px+3+((tx*7+k*13)%(ts-6)),mvy=py+3+((ty*11+k*7)%(ts-6));c.beginPath();c.arc(mvx,mvy,1.6,0,Math.PI*2);c.fill();}}
-// chipped corner
-const hh=((tx*73+ty*151)&7);if(hh===3){c.fillStyle='rgba(0,0,0,0.22)';c.beginPath();c.moveTo(px+20,py+5);c.lineTo(px+27,py+8);c.lineTo(px+22,py+12);c.closePath();c.fill();}
-c.fillStyle='rgba(0,0,0,0.18)';c.fillRect(px,py+ts-8,ts,8);const ab=this.isSolid(tx,ty-1),be=this.isSolid(tx,ty+1),le=this.isSolid(tx-1,ty),ri=this.isSolid(tx+1,ty);if(!ab){c.fillStyle=cl.wl;c.fillRect(px,py,ts,3);c.fillStyle=cl.gl;c.globalAlpha=.5;c.fillRect(px,py,ts,1);c.globalAlpha=1;
-const hd=((tx*131+ty*29)&7);
+// ---- fracture network: ridged noise picks where the stone has actually failed ----
+if(crackN>0.74){c.strokeStyle='rgba(0,0,0,'+(0.20+(crackN-0.74)*1.3).toFixed(2)+')';c.lineWidth=1.1;c.beginPath();
+let cxp=px+4+NZ.h2(tx,ty,3)*(ts-8),cyp=py;
+for(let k=0;k<5;k++){const j=(NZ.h2(tx,ty,k+9)-0.5)*9;cxp+=j;cyp+=ts/5;c.lineTo(cxp,cyp);}
+c.stroke();
+c.strokeStyle='rgba(255,255,255,0.05)';c.lineWidth=0.8;c.stroke();}
+// ---- damp seepage: dark vertical streaks under the wettest patches ----
+if(damp>0.62){c.globalAlpha=U.clamp((damp-0.62)*1.6,0,0.3);c.fillStyle='#000';
+for(let k=0;k<3;k++){const sxp=px+3+NZ.h2(tx,ty,k+41)*(ts-6),swd=1.4+NZ.h2(tx,ty,k+61)*2.4;c.fillRect(sxp,py,swd,ts);}
+c.globalAlpha=1;}
+// ---- lichen colonies: clustered, not evenly sprinkled ----
+if(mossN>0.55){const lc=this.theme==='crypt'?'rgba(150,95,235,':this.theme==='ramparts'?'rgba(160,180,70,':this.theme==='castle'?'rgba(80,200,170,':'rgba(85,175,105,';
+const strength=U.clamp((mossN-0.55)*2.4,0,1);
+for(let k=0;k<7;k++){const mvx=px+2+NZ.h2(tx,ty,k*7+5)*(ts-4),mvy=py+2+NZ.h2(tx,ty,k*7+6)*(ts-4);
+const local=NZ.v2(mvx*0.05,mvy*0.05,53);if(local<0.45)continue;
+c.fillStyle=lc+(0.10+strength*0.16).toFixed(2)+')';c.beginPath();c.arc(mvx,mvy,1.4+strength*2.2,0,Math.PI*2);c.fill();}}
+// ---- ambient occlusion in the tile's own corners, so blocks read as separate masses ----
+c.fillStyle='rgba(0,0,0,0.18)';c.fillRect(px,py+ts-8,ts,8);
+const ab=this.isSolid(tx,ty-1),be=this.isSolid(tx,ty+1),le=this.isSolid(tx-1,ty),ri=this.isSolid(tx+1,ty);
+if(!ab){c.fillStyle=cl.wl;c.fillRect(px,py,ts,3);c.fillStyle=cl.gl;c.globalAlpha=.5;c.fillRect(px,py,ts,1);c.globalAlpha=1;
+const hd=Math.floor(NZ.v2(nx*2.2,ny*2.2,163)*8);
 if(hd<3){const dx0=px+4+hd*9;
 if(this.theme==='sewers'){c.strokeStyle='#4a9a3a';c.lineWidth=1.5;c.beginPath();c.moveTo(dx0,py);c.lineTo(dx0-2,py-5);c.moveTo(dx0+3,py);c.lineTo(dx0+4,py-6);c.moveTo(dx0+6,py);c.lineTo(dx0+5,py-4);c.stroke();}
 else if(this.theme==='castle'){c.fillStyle='rgba(230,240,250,0.85)';c.beginPath();c.moveTo(dx0-2,py);c.quadraticCurveTo(dx0+3,py-5,dx0+8,py);c.closePath();c.fill();}
 else if(this.theme==='crypt'){c.fillStyle='#8a50c8';c.beginPath();c.moveTo(dx0,py);c.lineTo(dx0+2.5,py-6);c.lineTo(dx0+5,py);c.closePath();c.fill();c.fillStyle='#c8a0ff';c.beginPath();c.moveTo(dx0+1.5,py);c.lineTo(dx0+2.5,py-6);c.lineTo(dx0+3,py);c.closePath();c.fill();}
 else if(this.theme==='ramparts'){c.fillStyle='rgba(255,140,50,0.5)';c.fillRect(dx0,py-1.5,2,1.5);c.fillRect(dx0+5,py-1,1.5,1);}
 else{c.fillStyle=cl.wl;c.beginPath();c.arc(dx0+2,py-1,1.6,0,Math.PI*2);c.fill();c.beginPath();c.arc(dx0+7,py-0.8,1.1,0,Math.PI*2);c.fill();}}}if(!be){c.fillStyle=cl.wd;c.fillRect(px,py+ts-2,ts,2);}if(!le){c.fillStyle=cl.wl;c.fillRect(px,py,2,ts);}if(!ri){c.fillStyle=cl.wd;c.fillRect(px+ts-2,py,2,ts);}
-// soft top-lit shading for painterly depth
-c.fillStyle='rgba(255,255,255,0.05)';c.fillRect(px,py,ts,5);
-// lush moss creeping over an exposed top edge
-if(!ab){const mg=this.theme==='ramparts'?['#4a5a1e','#6a8a2c']:this.theme==='crypt'?['#2a5238','#46986a']:this.theme==='castle'?['#256050','#3aa886']:['#2c6a2c','#48aa48'];const mh=((tx*29+ty*13)&7);
-c.fillStyle=mg[0];c.beginPath();c.moveTo(px,py-2);for(let i=0;i<=4;i++){const mx2=px+i*8,dp=2+((tx*7+ty*11+i*17)&6);c.lineTo(mx2,py+dp);c.lineTo(mx2+4,py+1);}c.lineTo(px+ts,py-2);c.closePath();c.fill();
-c.fillStyle=mg[1];for(let i=0;i<3;i++){const dxm=px+4+((tx*13+i*23)%(ts-6)),dl=3+((tx+ty+i*7)&5);c.fillRect(dxm,py-1,1.6,dl);c.beginPath();c.arc(dxm+0.8,py-1+dl,1.5,0,Math.PI*2);c.fill();}
-if(mh<2){c.save();c.globalCompositeOperation='lighter';const lic=this.theme==='crypt'?'#b070ff':this.theme==='castle'?'#6fffd0':'#8fff8f';c.fillStyle=lic;c.shadowColor=lic;c.shadowBlur=5;c.beginPath();c.arc(px+6+mh*10,py,1.5,0,Math.PI*2);c.fill();c.restore();}}
-// climbing ivy on an exposed vertical face
-{const ivS=(!le&&((tx*7+ty*3)&3)===0)?-1:(!ri&&((tx*5+ty*3)&3)===0)?1:0;if(ivS!==0){const ivC=this.theme==='crypt'?['#3a5a4a','#5aaa7a']:this.theme==='ramparts'?['#3a4a1e','#6a8a2e']:['#2e5a2e','#4a9a4a'];const fx=ivS>0?px+ts-2:px+2;c.strokeStyle=ivC[0];c.lineWidth=1.5;c.beginPath();c.moveTo(fx,py);for(let i=0;i<=4;i++)c.lineTo(fx+Math.sin(i*1.7+tx)*3,py+i*8);c.stroke();c.fillStyle=ivC[1];for(let i=1;i<4;i++){const lx=fx+Math.sin(i*1.7+tx)*3;c.beginPath();c.ellipse(lx-ivS*3,py+i*8,2.6,1.6,ivS*0.5,0,Math.PI*2);c.fill();}}}
+// key light from above: a soft falloff rather than a flat band, so the top face turns into the light
+{const kg=linGrad(c,'key'+this.theme,0,py,0,py+14,[[0,'rgba(255,255,255,0.085)'],[1,'rgba(255,255,255,0)']]);c.fillStyle=kg;c.fillRect(px,py,ts,14);}
+// ---- MOSS CAP on an exposed top edge, thickness driven by the moss field ----
+// Where the colony noise is strong the cap is deep and hangs over the lip; where it is weak the
+// stone stays bare. Real overgrowth is patchy like this — a uniform green fringe on every ledge is
+// the single most obvious tell of procedural art.
+if(!ab&&mossN>0.40){const mg=this.theme==='ramparts'?['#3e5018','#5f7f26','#8fb840']:this.theme==='crypt'?['#26472f','#3d8459','#63c48c']:this.theme==='castle'?['#1d5245','#2f9078','#54c8a8']:['#1f5a24','#3c9440','#69c760'];
+const dens=U.clamp((mossN-0.40)*2.6,0,1);
+// silhouette layer: an irregular skirt whose depth follows the noise, drooping over the edge
+c.fillStyle=mg[0];c.beginPath();c.moveTo(px,py+1);
+for(let i=0;i<=8;i++){const mx2=px+i*(ts/8);const dp=1+NZ.v2(mx2*0.09,ty*0.6,53)*8*dens;c.lineTo(mx2,py+dp);}
+c.lineTo(px+ts,py+1);c.lineTo(px+ts,py-1-3*dens);c.lineTo(px,py-1-3*dens);c.closePath();c.fill();
+// midtone clumps
+c.fillStyle=mg[1];for(let i=0;i<5;i++){const dxm=px+2+NZ.h2(tx,ty,i+13)*(ts-4);
+ const l=NZ.v2(dxm*0.07,ty*0.5,53);if(l<0.42)continue;
+ c.beginPath();c.ellipse(dxm,py+1+l*3,2.6+l*2,1.6+l*1.4,0,0,Math.PI*2);c.fill();}
+// rim-lit tips catching the ambient from above — this is what makes the moss read as volume
+c.fillStyle=mg[2];for(let i=0;i<4;i++){const dxm=px+3+NZ.h2(tx,ty,i+27)*(ts-6),dl=2+NZ.h2(tx,ty,i+31)*4*dens;
+ c.fillRect(dxm,py-dl,1.4,dl);c.beginPath();c.arc(dxm+0.7,py-dl,1.3,0,Math.PI*2);c.fill();}
+// occasional bioluminescent spore among the densest growth
+if(dens>0.72){c.save();c.globalCompositeOperation='lighter';const lic=this.theme==='crypt'?'#b070ff':this.theme==='castle'?'#6fffd0':'#8fff8f';c.fillStyle=lic;c.shadowColor=lic;c.shadowBlur=5;c.beginPath();c.arc(px+4+NZ.h2(tx,ty,77)*(ts-8),py-2,1.5,0,Math.PI*2);c.fill();c.restore();}}
+// ---- CLIMBING IVY on an exposed vertical face, again gated by the moss field ----
+{const ivN=this.nIvy[_ni];
+ const ivS=(!le&&ivN>0.58)?-1:(!ri&&ivN<0.40)?1:0;
+ if(ivS!==0){const ivC=this.theme==='crypt'?['#2f4a3c','#54a074','#7fd0a0']:this.theme==='ramparts'?['#333f18','#5f7e28','#93b348']:['#254a26','#43913f','#6cc264'];
+ const fx=ivS>0?px+ts-2:px+2;
+ // two stems of slightly different length so the growth isn't a single ruled line
+ for(let st=0;st<2;st++){const ox2=st*3*(-ivS),len=ts*(0.7+0.3*NZ.h2(tx,ty,st+5));
+  c.strokeStyle=ivC[0];c.lineWidth=1.6-st*0.4;c.beginPath();c.moveTo(fx+ox2,py);
+  for(let i=0;i<=5;i++)c.lineTo(fx+ox2+Math.sin(i*1.6+tx+st*2)*3.2,py+i*(len/5));c.stroke();
+  for(let i=1;i<5;i++){const lx=fx+ox2+Math.sin(i*1.6+tx+st*2)*3.2,ly=py+i*(len/5);
+   c.fillStyle=i%2?ivC[1]:ivC[2];c.beginPath();c.ellipse(lx-ivS*3.2,ly,2.7,1.7,ivS*0.5,0,Math.PI*2);c.fill();}}}}
 }else if(t===2){
-// plank walkway on iron brackets
-c.fillStyle='#0e0b08';c.fillRect(px,py+7,ts,2);
-c.fillStyle=cl.p;c.fillRect(px,py,ts,7);
-c.fillStyle='rgba(0,0,0,0.35)';c.fillRect(px+10,py,1.2,7);c.fillRect(px+21,py,1.2,7);
-const gw=((tx*41+ty*7)&3);c.fillStyle='rgba(0,0,0,0.14)';c.fillRect(px+2+gw*4,py+2,7,1);c.fillRect(px+16+gw*2,py+4,6,1);
-c.fillStyle='rgba(255,255,255,0.16)';c.fillRect(px,py,ts,1.5);
-c.fillStyle='rgba(0,0,0,0.3)';c.fillRect(px,py+5.5,ts,1.5);
-c.fillStyle='#3a3a44';c.fillRect(px,py-1,4,10);c.fillRect(px+ts-4,py-1,4,10);
-c.fillStyle='#5a5a66';c.fillRect(px,py-1,4,1.5);c.fillRect(px+ts-4,py-1,4,1.5);
-c.fillStyle='#7a7a88';c.fillRect(px+1.2,py+2,1.6,1.6);c.fillRect(px+ts-2.8,py+2,1.6,1.6);
-// ---- plank variant: some walkways are mossy & old, others freshly weathered ----
-const pv=(tx*29+ty*17)&3;
-if(pv===1){c.fillStyle=this.theme==='crypt'?'rgba(120,90,210,0.5)':'rgba(60,140,80,0.5)';for(let k=0;k<3;k++)c.fillRect(px+4+k*9,py-1,3+((tx+k)&1),2);}
-else if(pv===2){c.fillStyle='rgba(0,0,0,0.2)';c.fillRect(px,py+2,ts,1);c.fillStyle='rgba(255,255,255,0.09)';c.fillRect(px,py+1,ts,0.8);c.fillStyle='rgba(0,0,0,0.16)';c.fillRect(px+6,py+3,ts-12,0.8);}
+// ============ WALKWAY DECK ============
+// This is the surface the player actually stands on, so it gets the most careful treatment of any
+// tile: a raised slab with a lit top face, a shadowed underside and a cast shadow beneath. Making
+// the walking plane the brightest, highest-contrast band on screen is both an art choice and a
+// legibility one — the eye should find the path before it finds anything else.
+const dn=this.nDeck[ty*this.tw+tx],wearN=NZ.h2(tx,ty,233);
+// cast shadow dropped below the deck so it reads as floating over the void behind it
+c.fillStyle='rgba(0,0,0,0.32)';c.fillRect(px,py+9,ts,5);
+c.fillStyle='#0d0a07';c.fillRect(px,py+7,ts,2.4);
+// slab body with an across-the-depth gradient (bright lip → shadowed core)
+c.fillStyle=linGrad(c,'deck'+this.theme,0,py,0,py+8,[[0,cl.wl],[0.34,cl.p],[1,cl.wd]]);c.fillRect(px,py,ts,7.6);
+// per-slab tonal drift so a long bridge is not one flat ribbon of colour
+c.globalAlpha=Math.abs(dn-0.5)*0.55;c.fillStyle=dn>0.5?cl.w2:'#000';c.fillRect(px,py,ts,7.6);c.globalAlpha=1;
+// joints between slabs, each with a lit leading edge
+c.fillStyle='rgba(0,0,0,0.42)';c.fillRect(px+10,py,1.3,7.6);c.fillRect(px+21,py,1.3,7.6);
+c.fillStyle='rgba(255,255,255,0.09)';c.fillRect(px+11.3,py,0.7,7.6);c.fillRect(px+22.3,py,0.7,7.6);
+// worn scuffs along the walking line
+c.fillStyle='rgba(0,0,0,0.16)';c.fillRect(px+2+Math.floor(wearN*4)*4,py+2.4,7,1);c.fillRect(px+16+Math.floor(wearN*3)*2,py+4.4,6,1);
+// bright walking surface + its bevel
+c.fillStyle='rgba(255,255,255,0.24)';c.fillRect(px,py,ts,1.6);
+c.fillStyle=cl.gl;c.globalAlpha=0.20;c.fillRect(px,py,ts,0.8);c.globalAlpha=1;
+c.fillStyle='rgba(0,0,0,0.34)';c.fillRect(px,py+6.1,ts,1.5);
+// iron brackets carrying the deck
+c.fillStyle='#2f2f38';c.fillRect(px,py-1,4,11);c.fillRect(px+ts-4,py-1,4,11);
+c.fillStyle='#5f5f6c';c.fillRect(px,py-1,4,1.5);c.fillRect(px+ts-4,py-1,4,1.5);
+c.fillStyle='#8b8b9a';c.fillRect(px+1.2,py+2,1.6,1.6);c.fillRect(px+ts-2.8,py+2,1.6,1.6);
+c.fillStyle='rgba(0,0,0,0.4)';c.fillRect(px+3,py+1,1,9);c.fillRect(px+ts-4.6,py+1,1,9);
+// ---- age: moss creeping along the lip where the deck stays damp ----
+if(dn>0.52){const dm=U.clamp((dn-0.52)*2.6,0,1);
+ c.fillStyle=this.theme==='crypt'?'rgba(120,90,210,0.55)':this.theme==='ramparts'?'rgba(140,160,60,0.5)':'rgba(60,150,85,0.55)';
+ for(let k=0;k<4;k++){const mxp=px+2+NZ.h2(tx,ty,k+91)*(ts-4);c.fillRect(mxp,py-1,2.4+dm*2,1.6+dm*1.6);}}
 }else if(t===3){c.fillStyle='#2e2e38';c.fillRect(px,py+ts-4,ts,4);for(let i=0;i<4;i++){const bx=px+i*8+1;c.fillStyle='#8a8a96';c.beginPath();c.moveTo(bx,py+ts);c.lineTo(bx+4,py+ts-13);c.lineTo(bx+8,py+ts);c.closePath();c.fill();c.fillStyle='#cfd2dd';c.beginPath();c.moveTo(bx+3,py+ts-1);c.lineTo(bx+4,py+ts-13);c.lineTo(bx+5,py+ts-1);c.closePath();c.fill();c.fillStyle='#e33';c.shadowColor='#f00';c.shadowBlur=4;c.beginPath();c.moveTo(bx+3.2,py+ts-9);c.lineTo(bx+4,py+ts-13);c.lineTo(bx+4.8,py+ts-9);c.closePath();c.fill();c.shadowBlur=0;}}else if(t===4){
 // ICE standalone tile (legacy/fallback) — one-way platform with ice look
 c.fillStyle='#88d8f8';c.fillRect(px,py,ts,8);c.fillStyle='#b8eeff';c.fillRect(px,py,ts,3);
@@ -1406,11 +1709,15 @@ _itemSpr[type]=cv;return cv;}
 const BG={
 theme:null,seed:0,motes:[],rng:0,ph:0,
 themes:{
-dungeon:{sky:['#060612','#101028','#0a0a1c'],far:'#12122c','mid':'#1a1a3a',near:'#242449',fog:'rgba(70,80,150,',mote:'#8bf',ray:'rgba(140,170,255,',horizon:'rgba(90,130,225,',haze:'18,26,58',win:'rgba(255,180,90,'},
-sewers:{sky:['#040e07','#0b1e10','#07150b'],far:'#10261a','mid':'#183824',near:'#22482e',fog:'rgba(60,135,85,',mote:'#8e6',ray:'rgba(140,235,160,',horizon:'rgba(85,200,130,',haze:'12,40,26',win:'rgba(200,255,150,'},
-ramparts:{sky:['#150b05','#29170c','#180d05'],far:'#251710','mid':'#372413',near:'#4a331e',fog:'rgba(175,105,55,',mote:'#fc7',ray:'rgba(255,195,105,',horizon:'rgba(255,155,70,',haze:'46,26,14',win:'rgba(255,205,115,'},
-castle:{sky:['#03101a','#072230','#041823'],far:'#0b2432','mid':'#123646',near:'#1a4658',fog:'rgba(55,150,155,',mote:'#7ef',ray:'rgba(120,230,225,',horizon:'rgba(70,205,190,',haze:'12,46,50',win:'rgba(255,195,95,'},
-crypt:{sky:['#090614','#150d28','#0a0616'],far:'#171030','mid':'#231742',near:'#2e1d52',fog:'rgba(125,72,185,',mote:'#c9f',ray:'rgba(195,125,255,',horizon:'rgba(155,95,235,',haze:'30,18,54',win:'rgba(205,135,255,'},
+// Palettes are built as a value ladder rather than a set of tints: sky darkest, then three
+// structure layers that step up in luminance as they come forward. Holding the hue near-constant
+// and moving only value is what gives readable aerial perspective — the far ruins recede into the
+// haze on their own instead of needing an opaque fog card painted over them.
+dungeon:{sky:['#02100f','#062120','#03100f'],far:'#0a2622','mid':'#0f3833',near:'#164a43',fog:'rgba(36,150,132,',mote:'#6fe8c8',ray:'rgba(110,240,210,',horizon:'rgba(48,225,175,',haze:'8,44,40',win:'rgba(255,176,80,'},
+sewers:{sky:['#020c07','#071810','#040f08'],far:'#0a2015','mid':'#102e1d',near:'#173e26',fog:'rgba(48,132,80,',mote:'#9fe86a',ray:'rgba(130,215,135,',horizon:'rgba(66,180,110,',haze:'8,34,20',win:'rgba(205,255,150,'},
+ramparts:{sky:['#160903','#2e1608','#1a0c04'],far:'#2a1810','mid':'#3f2612',near:'#57381c',fog:'rgba(200,110,45,',mote:'#ffc070',ray:'rgba(255,190,95,',horizon:'rgba(255,140,50,',haze:'54,28,12',win:'rgba(255,205,115,'},
+castle:{sky:['#020e1a','#062232','#031624'],far:'#0a2636','mid':'#103a50',near:'#175064',fog:'rgba(48,158,175,',mote:'#7cf0ff',ray:'rgba(120,235,240,',horizon:'rgba(64,210,215,',haze:'10,48,58',win:'rgba(255,195,95,'},
+crypt:{sky:['#080415','#160c2c','#090514'],far:'#181034','mid':'#261848',near:'#33205c',fog:'rgba(130,64,200,',mote:'#cf9cff',ray:'rgba(200,125,255,',horizon:'rgba(160,88,245,',haze:'32,16,60',win:'rgba(210,135,255,'},
 },
 init(theme,world){
 this.theme=theme;this.motes=[];
@@ -1426,9 +1733,24 @@ this.near=mk(13,36,90,64,168,0.22);
 },
 _struct(c,x,baseY,s,body,winCol,litA,detail,t){
 const y0=baseY-s.h;c.fillStyle=body;c.fillRect(x,y0,s.w,s.h);
+// ---- pilaster ribs: vertical piers breaking the flat slab into bays ----
+// A background building drawn as one plain rectangle reads as a placeholder no matter how it is
+// coloured. Two tones of vertical rib cost almost nothing and immediately give the mass structure,
+// rhythm and a sense of how large it is relative to the player.
+if(detail>=1){const bays=Math.max(2,s.cols);
+ for(let i=0;i<=bays;i++){const rx=x+i*(s.w/bays);
+  c.fillStyle='rgba(0,0,0,0.20)';c.fillRect(rx-2,y0,4,s.h);
+  c.fillStyle='rgba(255,255,255,0.045)';c.fillRect(rx-2,y0,1.4,s.h);}
+ // cornice band separating the upper storey
+ c.fillStyle='rgba(0,0,0,0.22)';c.fillRect(x,y0+s.h*0.32,s.w,3);
+ c.fillStyle='rgba(255,255,255,0.05)';c.fillRect(x,y0+s.h*0.32,s.w,1);}
 // crenellated / broken top
 const cols=s.tower?Math.max(2,s.cols):s.cols,mw=Math.max(5,s.w/(cols*1.7)),gap=(s.w-mw*cols)/(cols+1);
+c.fillStyle=body;
 for(let i=0;i<cols;i++){if((i+s.broken)%5===0)continue;const mx=x+gap+i*(mw+gap);c.fillRect(mx,y0-mw*0.85,mw,mw*0.85);}
+// a run of ruined roof beams poking out of the broken parapet
+if(detail>=1&&s.broken%3===0){c.fillStyle='rgba(0,0,0,0.32)';
+ for(let i=0;i<3;i++){const bxr=x+s.w*(0.2+i*0.28);c.save();c.translate(bxr,y0);c.rotate(-0.3+i*0.22);c.fillRect(0,-1.5,mw*1.6,3);c.restore();}}
 // a broken diagonal corner for ruin feel
 if(s.broken%2===0){c.save();c.fillStyle='rgba(0,0,0,0.18)';c.beginPath();c.moveTo(x+s.w,y0);c.lineTo(x+s.w-s.w*0.35,y0);c.lineTo(x+s.w,y0+s.h*0.28);c.closePath();c.fill();c.restore();}
 // per-biome silhouette accents so each location reads authentically at a glance
@@ -1440,9 +1762,17 @@ if(this.theme==='sewers'){c.save();c.fillStyle='rgba(0,0,0,0.3)';const pr=Math.m
 if(detail>=1){
 const cw2=(s.w-8)/s.cols,rh=(s.h-14)/Math.max(1,s.rows);
 for(const wgn of s.wins){const wx=x+5+wgn.cc*cw2+cw2*0.22,wy=y0+7+wgn.r*rh,ww=cw2*0.5,wh=Math.min(rh*0.62,ww*1.7);
-if(detail>=2){c.fillStyle='rgba(0,0,0,0.32)';c.fillRect(wx-1,wy-1,ww+2,wh+2);}
-if(wgn.lit){c.save();c.globalCompositeOperation='lighter';const fl=0.75+Math.sin(t/380+wgn.fl)*0.25;c.fillStyle=winCol+(litA*fl).toFixed(2)+')';c.fillRect(wx,wy,ww,wh);c.restore();}
-else if(detail>=2){c.fillStyle='rgba(0,0,0,0.22)';c.fillRect(wx,wy,ww,wh);}}}
+// Gothic arched heads instead of plain rectangles. A rounded opening reads as architecture at any
+// size, where a rectangle of the same area just reads as a hole — and it costs one extra curve.
+const arcW=(ox,oy)=>{const X=wx+(ox||0),Y=wy+(oy||0);c.beginPath();c.moveTo(X,Y+wh);c.lineTo(X,Y+ww*0.5);c.quadraticCurveTo(X+ww*0.5,Y-ww*0.25,X+ww,Y+ww*0.5);c.lineTo(X+ww,Y+wh);c.closePath();};
+if(detail>=2){c.fillStyle='rgba(0,0,0,0.34)';arcW(-1.2,-1.2);c.fill();arcW(1.2,1.2);c.fill();}
+if(wgn.lit){c.save();c.globalCompositeOperation='lighter';const fl=0.75+Math.sin(t/380+wgn.fl)*0.25;c.fillStyle=winCol+(litA*fl).toFixed(2)+')';arcW();c.fill();
+ // light spilling out onto the wall below a lit window
+ if(detail>=2){c.globalAlpha=0.35;c.fillStyle=winCol+(litA*fl*0.5).toFixed(2)+')';c.beginPath();c.moveTo(wx,wy+wh);c.lineTo(wx-ww*0.5,wy+wh+rh*0.45);c.lineTo(wx+ww*1.5,wy+wh+rh*0.45);c.lineTo(wx+ww,wy+wh);c.closePath();c.fill();}
+ c.restore();}
+else{c.fillStyle='rgba(0,0,0,0.28)';arcW();c.fill();
+ // mullion bar dividing the dark opening
+ if(detail>=2){c.fillStyle='rgba(255,255,255,0.05)';c.fillRect(wx+ww*0.45,wy+ww*0.2,1,wh-ww*0.2);}}}}
 // arched opening at the base
 if(s.arch){const aw=s.w*0.42,ax=x+s.w*0.29,ah=Math.min(s.h*0.55,46);c.fillStyle='rgba(0,0,0,0.4)';c.beginPath();c.moveTo(ax,baseY);c.lineTo(ax,baseY-ah*0.55);c.quadraticCurveTo(ax+aw/2,baseY-ah,ax+aw,baseY-ah*0.55);c.lineTo(ax+aw,baseY);c.closePath();c.fill();}
 },
@@ -1457,14 +1787,14 @@ c.fillStyle=this._skyGrad;c.fillRect(0,0,W,H);
 c.save();c.globalCompositeOperation='lighter';const hy=H*0.6;const hgr=c.createLinearGradient(0,hy-H*0.32,0,hy+H*0.24);hgr.addColorStop(0,pal.horizon+'0)');hgr.addColorStop(0.55,pal.horizon+(0.15+Math.sin(t/3400)*0.03).toFixed(3)+')');hgr.addColorStop(1,pal.horizon+'0)');c.fillStyle=hgr;c.fillRect(0,hy-H*0.32,W,H*0.56);c.restore();
 // FAR structures (silhouette only) + distance haze
 this._layer(c,this.far,cam,0.1,W,world,pal.far,pal.win,0,0,t);
-c.fillStyle='rgba('+pal.haze+',0.5)';c.fillRect(0,0,W,H);
+c.fillStyle='rgba('+pal.haze+',0.38)';c.fillRect(0,0,W,H);
 // god rays
 c.save();c.globalCompositeOperation='lighter';
-for(let i=0;i<4;i++){const rx=(i*W/4+((t/70)%(W))*0.12+i*140)%(W+340)-170;const rw=70+i*36;const grd=c.createLinearGradient(rx,0,rx+rw*0.55,H);grd.addColorStop(0,pal.ray+(0.045+Math.sin(t/2100+i)*0.028).toFixed(3)+')');grd.addColorStop(1,pal.ray+'0)');c.fillStyle=grd;c.beginPath();c.moveTo(rx,0);c.lineTo(rx+rw,0);c.lineTo(rx+rw*0.35,H);c.lineTo(rx-rw*0.35,H);c.closePath();c.fill();}
+for(let i=0;i<4;i++){const rx=(i*W/4+((t/70)%(W))*0.12+i*140)%(W+340)-170;const rw=70+i*36;const grd=c.createLinearGradient(rx,0,rx+rw*0.55,H);grd.addColorStop(0,pal.ray+(0.026+Math.sin(t/2100+i)*0.016).toFixed(3)+')');grd.addColorStop(0.55,pal.ray+(0.012).toFixed(3)+')');grd.addColorStop(1,pal.ray+'0)');c.fillStyle=grd;c.beginPath();c.moveTo(rx,0);c.lineTo(rx+rw,0);c.lineTo(rx+rw*0.35,H);c.lineTo(rx-rw*0.35,H);c.closePath();c.fill();}
 c.restore();
 // MID structures (lit windows) + light haze
 this._layer(c,this.mid,cam,0.26,W,world,pal.mid,pal.win,0.34,1,t);
-c.fillStyle='rgba('+pal.haze+',0.26)';c.fillRect(0,0,W,H);
+c.fillStyle='rgba('+pal.haze+',0.19)';c.fillRect(0,0,W,H);
 // NEAR structures (full detail)
 this._layer(c,this.near,cam,0.46,W,world,pal.near,pal.win,0.42,2,t);
 // drifting fog banks
@@ -1510,6 +1840,8 @@ document.getElementById('MusicVol').value=v.music*100;
 document.getElementById('MusicVal').textContent=Math.round(v.music*100)+'%';
 document.getElementById('SfxVol').value=v.sfx*100;
 document.getElementById('SfxVal').textContent=Math.round(v.sfx*100)+'%';
+document.getElementById('GameSpeed').value=Math.round(TIME.scale*100);
+document.getElementById('SpeedVal').textContent=Math.round(TIME.scale*100)+'%';
 }
 closeSettings(){document.getElementById('Settings').classList.remove('active');}
 setVolume(type,val){
@@ -1519,6 +1851,7 @@ if(type==='master'){SFX.setMaster(v);document.getElementById('MasterVal').textCo
 else if(type==='music'){SFX.setMusic(v);document.getElementById('MusicVal').textContent=Math.round(v*100)+'%';}
 else if(type==='sfx'){SFX.setSfx(v);document.getElementById('SfxVal').textContent=Math.round(v*100)+'%';}
 }
+setGameSpeed(val){TIME.set(val/100);document.getElementById('SpeedVal').textContent=Math.round(TIME.scale*100)+'%';}
 
 loadPerm(){const d=SaveSystem.getPerm();return{runs:d.runs||0,bonusHp:d.bonusHp||0,bonusDmg:d.bonusDmg||0,totalKills:d.totalKills||0};}
 savePerm(){SaveSystem.setPerm(this.permUpgrades);}
@@ -1586,7 +1919,228 @@ if(this.mossWalls.length<2){let placed=0;for(let tx=4;tx<W2-4&&placed<2;tx++){fo
 // ARROW TRAPS: mount 1-2 in walls overlooking an open corridor
 if(this.arrowTraps.length<2){let placed=0;for(let ty=4;ty<H2-3&&placed<2;ty++){for(let tx=3;tx<W2-9&&placed<2;){if(!solidAt(tx,ty)){tx++;continue;}let clearR=0;for(let k=1;k<=8;k++){if(openAt(tx+k,ty)&&openAt(tx+k,ty+1))clearR++;else break;}if(clearR>=6&&openAt(tx+1,ty-1)){this.arrowTraps.push(new ArrowTrap(tx,ty,{rotate:0,fireRate:160,projectileSpeed:6.5,damage:12}));placed++;tx+=9;}else tx++;}}}
 }
+this.buildTerrainProps();this.buildForeground();
 const sp=ld.spawn;this.player.x=sp.x*32;this.player.y=sp.y*32;this.player.onIce=false;this.player.onMoss=false;this.player.vx=0;this.player.vy=0;this.player.hp=this.player.mhp;this.player.inv=0;this.player.atk=false;this.player.rl=false;this.player.maxFallSpeed=0;this.portalPos={x:ld.portal.x*32,y:ld.portal.y*32};this.levelName=ld.name;this.levelNameTimer=180;this.state='playing';this.stats.st=Date.now();this.actualLvl=li;SFX.stopMusic();}
+
+// ===================== PROCEDURAL TERRAIN ENRICHMENT =====================
+// The hand-authored levels define *structure*: where you can stand, jump and fall. What they do
+// not define is geology — the rubble that collects at the foot of a wall, the stalactites that only
+// form over a tall cavern, the puddles that gather on long flat floors. Authoring all of that by
+// hand for every level is impractical, and scattering it randomly looks like confetti.
+//
+// So this pass *reads* the finished tilemap and derives detail from what the terrain actually is.
+// It runs in three stages:
+//   1. CLASSIFY — walk every tile and work out what kind of surface it is (ceiling over a tall
+//      cavity, floor at the foot of a wall, an exposed vertical face, a long flat shelf...).
+//      Each valid surface becomes a *candidate* for the prop types that physically belong there.
+//   2. WEIGHT — score each candidate with a smooth fBm "interest" field sampled at its position.
+//      Because the field is coherent, high scores form connected regions: one stretch of corridor
+//      comes out heavily encrusted while the next stays bare. That variation in density across the
+//      level is what random placement can never produce and what makes a space feel authored.
+//   3. RELAX — accept candidates greedily in score order, rejecting any that fall within a minimum
+//      radius of an already-accepted prop of the same family (Poisson-disk / dart-throwing). This
+//      guarantees even local spacing with no clumps or overlaps, so nothing ever intersects.
+//
+// Nothing here touches collision — every prop is decoration layered onto terrain that already
+// plays correctly, so enrichment can never make a level unplayable.
+buildTerrainProps(){
+ const w=this.world,tiles=w.tiles,W2=w.tw,H2=w.th;
+ const solid=(x,y)=>!!(tiles[y]&&tiles[y][x]===1);
+ const open =(x,y)=>!!(tiles[y]&&tiles[y][x]===0);
+ const seed=(this.lvl*7919+13)|0;
+ const interest=(x,y)=>NZ.warp(x*0.11,y*0.11,seed,3);
+ const cands=[];
+ const add=(type,x,y,fam,ex)=>{const o={type,fam,tx:x,ty:y,pri:interest(x,y),r:NZ.h2(x,y,seed+type.length)};if(ex)Object.assign(o,ex);cands.push(o);};
+
+ for(let y=1;y<H2-1;y++)for(let x=1;x<W2-1;x++){
+  if(!solid(x,y))continue;
+  // ---- CEILING: solid with open air beneath. Depth of the cavity decides what can form. ----
+  if(open(x,y+1)&&open(x,y+2)){
+   let depth=0;while(depth<10&&open(x,y+1+depth))depth++;
+   if(depth>=4)add('stalactite',x,y,'ceil',{len:6+depth*1.7});
+   else if(depth>=2)add('root',x,y,'ceil',{len:8+depth*2});
+   if(depth>=5&&NZ.fbm(x*0.3,y*0.3,seed+400,2)>0.62)add('drip',x,y,'drip',{});
+  }
+  // ---- FLOOR: solid with open air above. ----
+  if(open(x,y-1)&&open(x,y-2)){
+   const wallL=solid(x-1,y-1),wallR=solid(x+1,y-1);
+   if(wallL||wallR)add('rubble',x,y,'floor',{side:wallR?-1:1});
+   else{
+    // measure the flat shelf this tile belongs to — puddles only gather on long level ground
+    let run=1;for(let k=1;k<6&&solid(x+k,y)&&open(x+k,y-1);k++)run++;
+    for(let k=1;k<6&&solid(x-k,y)&&open(x-k,y-1);k++)run++;
+    if(run>=5)add('puddle',x,y,'floor',{});
+    else add('stalagmite',x,y,'floor',{len:5+NZ.h2(x,y,seed+7)*11});
+   }
+  }
+  // ---- VERTICAL FACE: a tall exposed wall, the only place brackets and shelves can mount. ----
+  const faceL=open(x-1,y)&&solid(x,y-1)&&solid(x,y+1);
+  const faceR=open(x+1,y)&&solid(x,y-1)&&solid(x,y+1);
+  if(faceL!==faceR){const s=faceR?1:-1;
+   // clearance in front decides between a lantern (needs a room to light) and a rock shelf
+   let clear=0;while(clear<7&&open(x+s*(clear+1),y)&&open(x+s*(clear+1),y+1))clear++;
+   if(clear>=4)add('wallTorch',x,y,'light',{side:s});
+   add('outcrop',x,y,'face',{side:s});
+   if(NZ.fbm(x*0.25,y*0.25,seed+900,2)>0.66)add('beam',x,y,'face',{side:s});
+  }
+ }
+
+ // ---- stage 3: Poisson relaxation, per family, in descending interest order ----
+ // The jitter term keeps the field from producing perfectly contour-following rows of props.
+ cands.sort((a,b)=>(b.pri+b.r*0.28)-(a.pri+a.r*0.28));
+ const minR={ceil:3.2,floor:3.6,face:4.2,light:9,drip:7};
+ const gate={stalactite:0.44,root:0.48,drip:0.30,rubble:0.42,puddle:0.40,stalagmite:0.52,wallTorch:0.50,outcrop:0.46,beam:0.55};
+ const kept=[],byFam={};
+ for(const cd of cands){
+  if(cd.pri<(gate[cd.type]||0.5))continue;                 // bare region — nothing forms here
+  const R=minR[cd.fam]||3.5,list=byFam[cd.fam]||(byFam[cd.fam]=[]);
+  let ok=true;
+  for(const o of list){const dx=o.tx-cd.tx,dy=o.ty-cd.ty;if(dx*dx+dy*dy<R*R){ok=false;break;}}
+  if(!ok)continue;
+  list.push(cd);kept.push(cd);
+  if(kept.length>320)break;                                // hard budget so huge maps stay cheap
+ }
+ this.tprops=kept;
+ // Auto-placed wall torches join the real deco list so they light the scene like authored ones,
+ // which is how the enrichment pass contributes to atmosphere and not just to silhouette.
+ for(const cd of kept)if(cd.type==='wallTorch')this.decos.push({x:cd.tx*32+(cd.side>0?26:-26),y:cd.ty*32+16,type:'torch',auto:true});
+}
+
+// ===== FOREGROUND OCCLUSION LAYER =====
+// Everything else in the scene sits at or behind the play plane, which leaves the frame feeling
+// like a flat diorama however much detail goes into it. A layer of near-black silhouettes drifting
+// *in front of* the action at greater-than-one parallax fixes that in one stroke: it gives the eye
+// something unambiguously closer than the character to measure depth against, and the extra
+// parallax speed makes the world read as genuinely three-dimensional as the camera pans.
+// Kept pure silhouette (no interior detail, heavy darkness) so it frames the action without ever
+// competing with it or hiding a threat — shapes are seeded away from the vertical middle band
+// where gameplay happens.
+buildForeground(){
+ const w=this.world;this.fg=[];const rngSeed=(this.lvl*3301+77)|0;
+ const n=10;
+ for(let i=0;i<n;i++){
+  const r1=NZ.h2(i*13,7,rngSeed),r2=NZ.h2(i*13,19,rngSeed),r3=NZ.h2(i*13,31,rngSeed);
+  this.fg.push({x:r1*w.pw,y:r2*w.ph,
+   kind:r3<0.42?'pillar':r3<0.78?'frond':'rubble',
+   s:0.7+NZ.h2(i*13,43,rngSeed)*0.9,
+   par:1.18+NZ.h2(i*13,57,rngSeed)*0.22,
+   ph:r1*99});}
+}
+drawForeground(c,cam,vw,vh){
+ if(!this.fg||PERF.tier>1)return;const t=Date.now();
+ const pScr=(this.player.x+this.player.w/2-cam.x);
+ c.save();
+ for(const f of this.fg){
+  // parallax > 1 means these slide past faster than the world behind them
+  const sx=f.x-cam.x*f.par,sy=f.y-cam.y*f.par;
+  const dx=((sx%this.world.pw)+this.world.pw)%this.world.pw;
+  for(const ox of [dx-this.world.pw,dx,dx+this.world.pw]){
+   if(ox<-260||ox>vw+260)continue;const oy=sy;
+   // A foreground element must never cost the player sight of themselves. Anything the character
+   // walks behind dissolves toward transparent as they approach — the depth cue is worth having,
+   // but not at the price of hiding the thing you are controlling.
+   const near=U.clamp(1-Math.abs(pScr-(ox+22*f.s))/110,0,1);
+   c.globalAlpha=0.86-near*0.66;
+   c.fillStyle='#03080a';
+   if(f.kind==='pillar'){
+    const pw2=26*f.s,ph2=vh*1.6;
+    c.fillRect(ox,oy-ph2*0.5,pw2,ph2);
+    // capital and base flare, so it reads as a column rather than a bar
+    c.fillRect(ox-6*f.s,oy-ph2*0.5,pw2+12*f.s,14*f.s);
+    c.fillRect(ox-6*f.s,oy+ph2*0.5-14*f.s,pw2+12*f.s,14*f.s);
+    // a whisper of edge light down one side keeps the silhouette from reading as a hole in the
+    // frame; masonry courses give it just enough scale to be legible as stone
+    c.globalAlpha*=0.5;c.fillStyle='#1d3b3c';c.fillRect(ox+pw2-2.5,oy-ph2*0.5,2.5,ph2);
+    c.globalAlpha*=0.6;c.fillStyle='#000';
+    for(let k=0;k<14;k++)c.fillRect(ox,oy-ph2*0.5+18+k*(ph2/14),pw2,1.6);
+   }else if(f.kind==='frond'){
+    // a heavy bough hanging into the top of the frame, swaying slowly
+    const sway=Math.sin(t/2400+f.ph)*7*f.s;
+    c.beginPath();c.moveTo(ox,oy-90*f.s);
+    c.quadraticCurveTo(ox+30*f.s+sway,oy-40*f.s,ox+16*f.s+sway,oy+30*f.s);
+    c.quadraticCurveTo(ox+52*f.s+sway,oy-16*f.s,ox+26*f.s,oy-90*f.s);
+    c.closePath();c.fill();
+    for(let l=0;l<5;l++){const q=(l+1)/6,lx=ox+13*f.s+sway*q,ly=oy-90*f.s+120*f.s*q;
+     c.beginPath();c.ellipse(lx+(l%2?24:-20)*f.s,ly,20*f.s,9*f.s,(l%2?0.5:-0.5),0,Math.PI*2);c.fill();}
+   }else{
+    // a broken block sitting on the very front plane
+    c.beginPath();c.moveTo(ox,oy+40*f.s);c.lineTo(ox+10*f.s,oy-16*f.s);c.lineTo(ox+54*f.s,oy-6*f.s);
+    c.lineTo(ox+66*f.s,oy+40*f.s);c.closePath();c.fill();}
+  }}
+ c.restore();
+}
+
+drawTerrainProps(c,cam,vw,vh){
+ // Enrichment is pure decoration, so it is the first thing a struggling device should shed.
+ if(!this.tprops||PERF.tier>1)return;const th=this.world.theme,t=Date.now();
+ const stone={dungeon:['#3a424c','#242a32','#5c6874'],sewers:['#2e3a28','#1a2216','#4a5c40'],ramparts:['#4d3826','#291a0e','#6f5640'],castle:['#2c3849','#161e2a','#4a5a73'],crypt:['#362a48','#1c1428','#54406f']}[th]||['#3a424c','#242a32','#5c6874'];
+ const wet={dungeon:'#3fd8b4',sewers:'#79c257',ramparts:'#e08a34',castle:'#5aa8e6',crypt:'#b264ef'}[th]||'#3fd8b4';
+ for(const pr of this.tprops){
+  const px=pr.tx*32-cam.x,py=pr.ty*32-cam.y;
+  if(px<-70||px>vw+70||py<-90||py>vh+90)continue;
+  const j=pr.r*32;
+  switch(pr.type){
+   case'stalactite':{ // a tapered spike of dripstone, banded and catching light on one side
+    const bx=px+6+pr.r*20,len=pr.len,by=py+32;
+    c.fillStyle=stone[1];c.beginPath();c.moveTo(bx-5,by-2);c.lineTo(bx+0.5,by+len);c.lineTo(bx+5,by-2);c.closePath();c.fill();
+    c.fillStyle=stone[0];c.beginPath();c.moveTo(bx-3,by-2);c.lineTo(bx+0.5,by+len*0.92);c.lineTo(bx+3.4,by-2);c.closePath();c.fill();
+    c.fillStyle=stone[2];c.beginPath();c.moveTo(bx-2.6,by-2);c.lineTo(bx-0.4,by+len*0.62);c.lineTo(bx+0.2,by-2);c.closePath();c.fill();
+    c.strokeStyle='rgba(0,0,0,0.28)';c.lineWidth=0.9;
+    for(let k=1;k<4;k++){const q=k/4,yy=by+len*q,ww=4.6*(1-q);c.beginPath();c.moveTo(bx-ww,yy);c.lineTo(bx+ww,yy);c.stroke();}
+    // a bead of water forming at the tip
+    c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.5+Math.sin(t/700+pr.tx)*0.3;c.fillStyle=wet;c.beginPath();c.arc(bx+0.5,by+len,1.3,0,Math.PI*2);c.fill();c.restore();
+    break;}
+   case'stalagmite':{ // the same form inverted, growing up from the floor
+    const bx=px+6+pr.r*20,len=pr.len,by=py;
+    c.fillStyle=stone[1];c.beginPath();c.moveTo(bx-5,by+2);c.lineTo(bx+0.5,by-len);c.lineTo(bx+5,by+2);c.closePath();c.fill();
+    c.fillStyle=stone[0];c.beginPath();c.moveTo(bx-3.2,by+2);c.lineTo(bx+0.8,by-len*0.9);c.lineTo(bx+3.2,by+2);c.closePath();c.fill();
+    c.fillStyle=stone[2];c.beginPath();c.moveTo(bx+0.6,by+2);c.lineTo(bx+1,by-len*0.72);c.lineTo(bx+2.8,by+2);c.closePath();c.fill();
+    break;}
+   case'rubble':{ // broken stone collecting where a wall meets the floor
+    const s=pr.side,bx=px+(s>0?4:28-8);
+    for(let k=0;k<5;k++){const rr=2+NZ.h2(pr.tx,pr.ty,k+3)*3.4;
+     const ox=bx+s*k*3.4+NZ.h2(pr.tx,pr.ty,k+11)*4,oy=py-rr*0.7-NZ.h2(pr.tx,pr.ty,k+17)*3;
+     c.fillStyle=stone[1];c.beginPath();c.ellipse(ox,oy+1,rr,rr*0.72,0,0,Math.PI*2);c.fill();
+     c.fillStyle=k%2?stone[0]:stone[2];c.beginPath();c.ellipse(ox-0.6,oy-0.5,rr*0.7,rr*0.5,0,0,Math.PI*2);c.fill();}
+    break;}
+   case'puddle':{ // standing water, with a bright specular sliver and a slow ripple
+    const wdt=13+pr.r*13,cx2=px+16,cy2=py+1;
+    c.save();c.globalAlpha=0.5;c.fillStyle='#05100e';c.beginPath();c.ellipse(cx2,cy2,wdt,3.2,0,0,Math.PI*2);c.fill();
+    c.globalCompositeOperation='lighter';c.globalAlpha=0.16+Math.sin(t/1500+pr.tx)*0.05;c.fillStyle=wet;
+    c.beginPath();c.ellipse(cx2,cy2,wdt*0.92,2.6,0,0,Math.PI*2);c.fill();
+    c.globalAlpha=0.30;c.fillStyle='#ffffff';c.fillRect(cx2-wdt*0.45,cy2-0.9,wdt*0.5,0.9);c.restore();
+    break;}
+   case'root':{ // a thick tree root that has forced its way through the ceiling
+    const bx=px+4+pr.r*22,len=pr.len,rc2=th==='crypt'?['#3a2a52','#5a4278']:['#3a2a18','#5c452a'];
+    c.strokeStyle=rc2[0];c.lineWidth=4;c.lineCap='round';c.beginPath();c.moveTo(bx,py+30);
+    c.quadraticCurveTo(bx+Math.sin(pr.tx)*7,py+30+len*0.55,bx+Math.sin(pr.tx*1.7)*10,py+30+len);c.stroke();
+    c.strokeStyle=rc2[1];c.lineWidth=1.6;c.beginPath();c.moveTo(bx,py+30);
+    c.quadraticCurveTo(bx+Math.sin(pr.tx)*7,py+30+len*0.55,bx+Math.sin(pr.tx*1.7)*10,py+30+len);c.stroke();
+    // hair roots branching off the main strand
+    c.strokeStyle=rc2[0];c.lineWidth=1.2;
+    for(let k=1;k<3;k++){const q=k/3,rx=bx+Math.sin(pr.tx)*7*q,ry=py+30+len*q;
+     c.beginPath();c.moveTo(rx,ry);c.lineTo(rx+(k%2?6:-6),ry+5);c.stroke();}
+    c.lineCap='butt';break;}
+   case'outcrop':{ // a rock shelf jutting from a vertical face, with a lit top plane
+    const s=pr.side,bx=px+(s>0?32:0),hgt=5+pr.r*6,wdt=6+pr.r*9;
+    c.fillStyle=stone[1];c.beginPath();c.moveTo(bx,py+8);c.lineTo(bx+s*wdt,py+10+hgt*0.4);c.lineTo(bx+s*wdt*0.6,py+12+hgt);c.lineTo(bx,py+14+hgt);c.closePath();c.fill();
+    c.fillStyle=stone[2];c.beginPath();c.moveTo(bx,py+8);c.lineTo(bx+s*wdt,py+10+hgt*0.4);c.lineTo(bx+s*wdt*0.75,py+12+hgt*0.4);c.lineTo(bx,py+10.5);c.closePath();c.fill();
+    break;}
+   case'beam':{ // a timber shoring beam wedged against the wall — a ruin holding itself up
+    const s=pr.side,bx=px+(s>0?30:2);
+    c.fillStyle='#2e2114';c.fillRect(bx-(s>0?0:5),py+2,5,28);
+    c.fillStyle='#463322';c.fillRect(bx-(s>0?0:5),py+2,5,2.4);
+    c.fillStyle='#1c140b';c.fillRect(bx-(s>0?0:5)+(s>0?3.6:0),py+2,1.4,28);
+    c.fillStyle='#6a5a48';c.beginPath();c.arc(bx+(s>0?2.5:-2.5),py+7,1.1,0,Math.PI*2);c.fill();c.beginPath();c.arc(bx+(s>0?2.5:-2.5),py+24,1.1,0,Math.PI*2);c.fill();
+    break;}
+   case'drip':{ // a slow, steady drip — the only animated prop, so the space feels alive
+    const bx=px+8+pr.r*16,phase=(t/1400+pr.r)%1;
+    c.save();c.globalCompositeOperation='lighter';c.globalAlpha=(1-phase)*0.55;c.fillStyle=wet;
+    c.beginPath();c.ellipse(bx,py+32+phase*46,1.1,2.4+phase*2.2,0,0,Math.PI*2);c.fill();c.restore();
+    break;}
+  }
+ }
+}
 
 scrollCost(id){const p=this.player;const lv=id==='brutality'?p.brutality:id==='tactics'?p.tactics:p.survival;return 3+lv*2;}
 showCellShop(){this.state='shop';SFX.portal();const el=document.getElementById('CellShop');const p=this.player;
@@ -1657,16 +2211,43 @@ p.rally=Math.min(p.rally+Math.ceil(dmg*0.6),Math.ceil(p.mhp*0.5));p.rallyT=240;t
 this.shake.trigger(8,10);this.ft.push(new FT(p.x+p.w/2,p.y,'-'+dmg,'#f00'));
 this.particles.emit(p.x+p.w/2,p.y+p.h/2,10,{color:'#f00',size:3,life:18,vxMin:-4,vxMax:4,vyMin:-3,vyMax:1});const hpRatio=p.hp/p.mhp;if(hpRatio<=0.3)SFX.startHeartbeat(hpRatio);}
 
-doMeleeHit(){const p=this.player,w=p.weapons[p.cw];const step=p.comboStep||0,fin=step===2,mult=[1,1.25,1.65][step];const range=w.range*(fin?1.28:1);const hb={x:p.facing===1?p.x+p.w:p.x-range,y:p.y-5,w:range,h:p.h+10};this.slashArcs.push(new SlashArc(p.facing===1?p.x+p.w:p.x,p.y+p.h/2,p.facing,range,fin?'#eaf7ff':step===1?'#9fe4ff':'#bfe0ff',step));let hit=false;let anyCrit=false;for(const en of this.enemies){if(!en.alive)continue;if(U.rc(hb,{x:en.x,y:en.y,w:en.w,h:en.h})){if(en.shielder&&en.facing===-p.facing&&en.bashPhase!=='bash'){en.hp-=Math.max(1,Math.ceil(w.damage*0.12));en.hf=6;const bx=en.facing===1?en.x+en.w:en.x;this.ft.push(new FT(en.x+en.w/2,en.y-6,'BLOCK','#adf'));SFX.block();this.particles.emit(bx,en.y+en.h/2,7,{color:'#cfe',size:2.5,life:10,glow:true,gravity:0,vxMin:p.facing*-2,vxMax:p.facing*2,vyMin:-3,vyMax:3});p.vx=-p.facing*4;this.shake.trigger(3,4);hit=true;if(!en.alive)this.onKill(en);continue;}let d=Math.round((w.damage+U.ri(-3,3))*mult);if(fin)d+=Math.round(w.damage*0.45);const crit=U.ch(0.12);if(crit){d=Math.round(d*1.7);anyCrit=true;}en.hit(d,p.facing*(fin?2.4:step===1?1.3:1),fin?6:0);hit=true;this.ft.push(new FT(en.x+en.w/2,en.y-(crit?6:0),(crit?'CRIT ':'')+d,crit?'#ff0':'#f44',crit?17:13));
+doMeleeHit(){const p=this.player,w=p.weapons[p.cw];const step=U.clamp(p.comboStep|0,0,3),cd=COMBO[step],fin=step===3;
+const mult=cd.dmg;const range=w.range*cd.range;
+// Each beat carves a differently shaped volume. Impale is a long, thin lance that reaches past the
+// crowd; Moonfall is a wide bubble centred on the player that catches enemies behind you too.
+const hb=cd.shape==='stab'
+  ?{x:p.facing===1?p.x+p.w-2:p.x-range,y:p.y+p.h*0.18,w:range+2,h:p.h*0.5}
+  :cd.shape==='ring'
+  ?{x:p.x+p.w/2-range*0.92,y:p.y-14,w:range*1.84,h:p.h+30}
+  :{x:p.facing===1?p.x+p.w:p.x-range,y:p.y-5,w:range,h:p.h+10};
+// Pivot the ribbon on the *shoulder*, exactly where drawPlayer roots the arm, so the sweep traces
+// the path the blade visibly takes. Anchoring it at the body edge (as before) left the arc floating
+// slightly behind the weapon, which is the kind of small misregistration that reads as "cheap".
+this.slashArcs.push(new SlashArc(p.x+p.w/2+p.facing*3,p.y+11,p.facing,range,cd.col,step));
+let hit=false;let anyCrit=false;for(const en of this.enemies){if(!en.alive)continue;if(U.rc(hb,{x:en.x,y:en.y,w:en.w,h:en.h})){if(en.shielder&&en.facing===-p.facing&&en.bashPhase!=='bash'){en.hp-=Math.max(1,Math.ceil(w.damage*0.12));en.hf=6;const bx=en.facing===1?en.x+en.w:en.x;this.ft.push(new FT(en.x+en.w/2,en.y-6,'BLOCK','#adf'));SFX.block();this.particles.emit(bx,en.y+en.h/2,7,{color:'#cfe',size:2.5,life:10,glow:true,gravity:0,vxMin:p.facing*-2,vxMax:p.facing*2,vyMin:-3,vyMax:3});p.vx=-p.facing*4;this.shake.trigger(3,4);hit=true;if(!en.alive)this.onKill(en);continue;}let d=Math.round((w.damage+U.ri(-3,3))*mult);if(fin)d+=Math.round(w.damage*0.45);
+// deeper into the chain = better crit odds, so finishing a combo is worth the commitment
+const crit=U.ch(0.10+step*0.045);if(crit){d=Math.round(d*1.7);anyCrit=true;}
+// Moonfall knocks away from the player rather than along facing, so the ring reads as a burst
+const kbDir=cd.shape==='ring'?(Math.sign(en.x+en.w/2-(p.x+p.w/2))||p.facing):p.facing;
+en.hit(d,kbDir*cd.kb,cd.up);hit=true;this.ft.push(new FT(en.x+en.w/2,en.y-(crit?6:0),(crit?'CRIT ':'')+d,crit?'#ff0':'#f44',crit?17:13));
 if(p.rally>0){const rec=Math.min(p.rally,Math.ceil(d*0.5));if(rec>0){p.hp=Math.min(p.hp+rec,p.mhp);p.rally-=rec;this.ft.push(new FT(p.x+p.w/2,p.y-10,'+'+rec,'#fa4',11));this.particles.emit(p.x+p.w/2,p.y+p.h/2,3,{color:'#fa4',size:2,life:14,glow:true,gravity:-0.08,vxMin:-1,vxMax:1,vyMin:-1.5,vyMax:-0.5});}}const hx=p.facing===1?en.x+en.w:en.x,hy=en.y+en.h/2;this.particles.emit(hx,hy,8,{color:'#f44',size:3,life:18,vxMin:p.facing*1,vxMax:p.facing*5,vyMin:-3,vyMax:1});this.particles.emit(hx,hy,6,{color:'#fff',size:2,life:9,glow:true,gravity:0,friction:0.85,vxMin:p.facing*2,vxMax:p.facing*8,vyMin:-3,vyMax:3});this.particles.emit(hx,hy,4,{color:'#8a1020',size:2.5,life:26,gravity:0.22,vxMin:p.facing*0.5,vxMax:p.facing*3,vyMin:-2,vyMax:0});if(p.pullOnHit&&en.alive)en.vx+=-p.facing*3;if(!en.alive)this.onKill(en);}}for(const bl of this.barrels){if(!bl.alive)continue;if(U.rc(hb,{x:bl.x,y:bl.y,w:bl.w,h:bl.h})){bl.hp-=w.damage;if(bl.hp<=0){bl.alive=false;this.breakBarrel(bl);}hit=true;}}
 for(const ch of this.chests){if(ch.opened)continue;if(U.rc(hb,{x:ch.x,y:ch.y,w:ch.w,h:ch.h})){this.openChest(ch);hit=true;}}
 for(const dr of this.doors){if(!dr.alive)continue;if(U.rc(hb,{x:dr.x,y:dr.y,w:dr.w,h:dr.h})){dr.hp-=w.damage;this.particles.emit(dr.x+dr.w/2,p.y+p.h/2,6,{color:'#8a6a3a',size:3,life:16,gravity:0.15,vxMin:p.facing*1,vxMax:p.facing*4,vyMin:-3,vyMax:0});if(dr.hp<=0)this.breakDoor(dr);hit=true;}}
-if(hit){SFX.swordHit();this.shake.trigger(fin?10:5,fin?13:7);this.ff=anyCrit?4:fin?5:2;
-if(fin){SFX.impact();const rx=p.facing===1?p.x+p.w+range*0.5:p.x-range*0.5,ry=p.y+p.h/2;
-// heavy finisher shock-ring + sparks
-this.slashArcs.push(new SlashArc(p.facing===1?p.x+p.w:p.x,ry,p.facing,range*1.15,'#ffffff',2));
-this.particles.emit(rx,ry,20,{color:'#fff',size:3,life:12,glow:true,gravity:0,friction:0.82,vxMin:-6,vxMax:6,vyMin:-6,vyMax:6});
-this.particles.emit(rx,ry,12,{color:'#cfeaff',size:4,life:18,glow:true,gravity:0.05,vxMin:p.facing*1,vxMax:p.facing*9,vyMin:-4,vyMax:2});}}}
+if(hit){SFX.swordHit();this.shake.trigger(cd.shake[0],cd.shake[1]);
+// Hit-stop is the single strongest weight cue in melee: freeze the sim for a few frames so the
+// impact lands on the player's eye before motion resumes. Heavier beats freeze longer.
+this.ff=Math.max(this.ff,anyCrit?cd.hold+2:cd.hold);
+// impact flash pinned to the contact point
+this.hitFlash={x:cd.shape==='ring'?p.x+p.w/2:p.x+p.w/2+p.facing*range*0.55,y:p.y+p.h/2,t:7,mt:7,r:7+step*2.5,col:cd.col};
+if(cd.shape==='stab'){const rx=p.x+(p.facing===1?p.w+range*0.85:-range*0.85),ry=p.y+p.h*0.42;
+  this.particles.emit(rx,ry,14,{color:'#ffffff',size:2.5,life:11,glow:true,gravity:0,friction:0.8,vxMin:p.facing*3,vxMax:p.facing*11,vyMin:-3,vyMax:3});
+  p.vx+=p.facing*2.2;}
+if(fin){SFX.impact();const rx=p.x+p.w/2,ry=p.y+p.h/2;
+// Moonfall: a full shock-ring plus a ground burst radiating from the player's feet
+this.particles.emit(rx,ry,26,{color:'#fff',size:3,life:14,glow:true,gravity:0,friction:0.82,vxMin:-8,vxMax:8,vyMin:-8,vyMax:8});
+this.particles.emit(rx,ry,16,{color:'#cfeaff',size:4,life:22,glow:true,gravity:0.05,vxMin:-9,vxMax:9,vyMin:-5,vyMax:3});
+this.particles.emit(p.x+p.w/2,p.y+p.h,14,{color:'#9a8a70',size:3.4,life:20,gravity:0.16,vxMin:-6,vxMax:6,vyMin:-3.2,vyMax:-0.4});
+this.ft.push(new FT(p.x+p.w/2,p.y-30,cd.name.toUpperCase()+'!','#dff4ff',16));}}}
 
 breakDoor(dr){if(!dr.alive)return;dr.alive=false;SFX.doorBreak();this.shake.trigger(6,8);this.particles.emit(dr.x+dr.w/2,dr.y+dr.h/2,20,{color:'#7a5228',size:4,life:26,gravity:0.2,vxMin:-5,vxMax:5,vyMin:-5,vyMax:1});this.particles.emit(dr.x+dr.w/2,dr.y+dr.h/2,8,{color:'#c8a060',size:2.5,life:18,gravity:0.15,vxMin:-4,vxMax:4,vyMin:-4,vyMax:0});}
 
@@ -1743,10 +2324,24 @@ p.sneak=p.gr&&inp.isSneak()&&!p.rl&&!p.atk&&!p.climb&&!p.hang;
 // Remember ice contact briefly so a jump off ice keeps its slide momentum in the air.
 if(p.onIce)p.iceT=10;else if(p.iceT>0)p.iceT-=s;
 const slippery=p.onIce||(!p.gr&&p.iceT>0);
-const iceAcc=slippery?0.04:p.gr?.2:.12;
-const iceFric=slippery?.99:p.gr?.75:.92;
 const maxSpd=(slippery?p.speed*2.4:p.speed)*(p.slowT>0?0.55:1)*(p.sneak?0.5:1);
-if(Math.abs(mx)>.1){p.vx=U.lerp(p.vx,mx*maxSpd*atkSpeedMult,iceAcc);p.facing=mx>0?1:-1;}else{p.vx*=iceFric;if(Math.abs(p.vx)<.1)p.vx=0;}
+// ---- GROUND / AIR LOCOMOTION ----
+// Momentum is what makes a body feel like it has mass. Rather than snapping to a target velocity,
+// the character accelerates toward it at a rate that depends on the surface and on whether you are
+// reversing: a turnaround gets a much sharper rate so direction changes stay crisp and responsive
+// even though top speed is reached gradually. Deceleration is likewise split — hard on the ground
+// (you plant your feet) and almost absent in the air (you keep your momentum through a jump).
+// All rates go through U.app so they are exact under any timestep or game-speed setting.
+{const target=mx*maxSpd*atkSpeedMult;
+if(Math.abs(mx)>.1){p.facing=mx>0?1:-1;
+  const turning=Math.abs(p.vx)>0.5&&Math.sign(target)!==Math.sign(p.vx);
+  const rate=slippery?0.038:(p.gr?(turning?0.44:0.27):(turning?0.21:0.145));
+  p.vx=U.app(p.vx,target,rate,s);
+  // skid dust when you plant and reverse at speed
+  if(turning&&p.gr&&Math.abs(p.vx)>2.4&&this.fr%3===0)this.particles.emit(p.x+p.w/2,p.y+p.h-1,2,{color:'#a89878',size:2.4,life:14,gravity:0.04,friction:0.9,vxMin:-p.facing*3,vxMax:-p.facing*0.5,vyMin:-1.4,vyMax:0.2});
+}else{
+  const fric=slippery?0.009:(p.gr?0.31:0.055);
+  p.vx=U.app(p.vx,0,fric,s);if(Math.abs(p.vx)<.08)p.vx=0;}}
 // holding DOWN drops through one-way platforms
 if(inp.isJump()){if(!p.jmp){p.jbt=10;p.jmp=true;}}else p.jmp=false;
 if(p.jbt>0){
@@ -1772,14 +2367,46 @@ if(p.gr&&Math.abs(p.vx)>1&&this.fr%14===0)SFX.footstep();
 // Aerial slam: hold down + attack in the air
 if(!p.gr&&!p.slam&&inp.isDown()&&inp.isAttack()&&p.acd<=0&&p.vy>-3){p.slam=true;p.vy=Math.max(p.vy,14);p.vx*=0.3;p.acd=10;SFX.dodge();}
 if(p.slam&&!p.gr)this.particles.emit(p.x+p.w/2,p.y+p.h,2,{color:'#fc6',size:3,life:12,glow:true,gravity:0,vxMin:-1,vxMax:1,vyMin:-2,vyMax:-0.5});
-if((inp.isAttack()||p.atkBuf>0)&&!p.atk&&p.acd<=0&&(p.gr||!inp.isDown())){p.atkBuf=0;p.atk=true;p.at=0;p.didHit=false;const _sword=p.weapons[p.cw].type==='sword';p.ad=Math.round(p.weapons[p.cw].speed*(_sword?1.2:1));p.acd=p.ad+4;
-if(_sword){p.comboStep=(p.comboT>0)?(p.comboStep+1)%3:0;p.comboT=Math.round(p.ad*3.4);if(p.gr)p.vx+=p.facing*(p.comboStep===2?4.5:1.7);SFX.swordSwing();}
-if(p.weapons[p.cw].type==='bow'){p.bowFired=false;}this.shake.trigger(3,4);}
-if(p.atk){p.at+=s;if(p.at>=p.ad)p.atk=false;if(!p.didHit&&p.at>=5&&p.weapons[p.cw].type==='sword'){p.didHit=true;this.doMeleeHit();}
+// ---- SWORD COMBO CHAIN ----
+// Chaining is a *rhythm*, not a mash: the next beat only queues once the current swing has passed
+// its own strike frame, and the window to continue closes if you dawdle. Landing the previous hit
+// widens that window, so an aggressive, connecting player keeps the chain alive while whiffing
+// drops you back to the opening cut.
+const _swordNow=p.weapons[p.cw].type==='sword';
+const _canChain=!p.atk||(_swordNow&&p.at>=p.ad*(COMBO[U.clamp(p.comboStep|0,0,3)].hitAt+0.18));
+if((inp.isAttack()||p.atkBuf>0)&&_canChain&&p.acd<=0&&(p.gr||!inp.isDown())){p.atkBuf=0;p.atk=true;p.at=0;p.didHit=false;const _sword=_swordNow;
+if(_sword){
+  p.comboStep=(p.comboT>0)?((p.comboStep+1)%COMBO.length):0;
+  const cd=COMBO[p.comboStep];
+  p.ad=Math.round(p.weapons[p.cw].speed*1.2*cd.dur);
+  p.acd=Math.round(p.ad*(p.comboStep===COMBO.length-1?1.55:0.42));  // long recovery only after the finisher
+  p.comboT=Math.round(p.ad*2.6);
+  // the step-in: each beat carries the body forward, the finisher also hops off the ground
+  if(p.gr){p.vx+=p.facing*cd.lunge;if(cd.shape==='ring')p.vy=-4.2;}
+  else p.vx+=p.facing*cd.lunge*0.45;
+  p.sqx=1+0.06*p.comboStep;p.sqy=2-p.sqx;
+  SFX.swordSwing();
+  if(p.comboStep>0)this.ft.push(new FT(p.x+p.w/2+p.facing*10,p.y-6,'×'+(p.comboStep+1),p.comboStep===3?'#dff4ff':'#8fd8ff',10+p.comboStep*2));
+}else{p.ad=Math.round(p.weapons[p.cw].speed);p.acd=p.ad+4;}
+if(p.weapons[p.cw].type==='bow'){p.bowFired=false;}this.shake.trigger(2,3);}
+if(p.atk){p.at+=s;if(p.at>=p.ad)p.atk=false;
+if(!p.didHit&&p.weapons[p.cw].type==='sword'&&p.at>=p.ad*COMBO[U.clamp(p.comboStep|0,0,3)].hitAt){p.didHit=true;this.doMeleeHit();}
 if(p.weapons[p.cw].type==='bow'&&!p.bowFired&&p.at>=p.ad*0.55){p.bowFired=true;this.arrows.push(new Arrow(p.x+p.w/2,p.y+p.h/2-2,p.facing*13.75,-0.5,p.weapons[p.cw].damage,'player'));SFX.bowShoot();p.vx-=p.facing*1.2;this.particles.emit(p.x+p.w/2+p.facing*14,p.y+p.h/2-2,4,{color:'#ffe9a0',size:1.8,life:8,glow:true,gravity:0,friction:0.85,vxMin:p.facing*2,vxMax:p.facing*5,vyMin:-1,vyMax:1});}}
 if((inp.isRoll()||p.rlBuf>0)&&!p.rl&&p.rlcd<=0&&(p.gr||p.hasAirRoll)){p.rlBuf=0;p.rl=true;p.rlt=p.rld;p.rlcd=35;SFX.dodge();p.sqx=1.2;p.sqy=0.8;if(p.gr){this.particles.emit(p.x+p.w/2-p.facing*4,p.y+p.h,8,{color:'#b0a082',size:3,life:16,gravity:0.03,friction:0.88,vxMin:-p.facing*3,vxMax:-p.facing*0.3,vyMin:-1.5,vyMax:0.2});}else{p.vy=Math.min(p.vy,1);this.particles.emit(p.x+p.w/2,p.y+p.h,6,{color:'#4af',size:2.5,life:12,glow:true,gravity:0,vxMin:-2,vxMax:2,vyMin:-1,vyMax:1});}this.rollDamagedEnemies.clear();}
 if(inp.isSkill()&&p.scd<=0){p.scd=p.smc;if(!p.gr){p.vy=15;}else{for(let i=-3;i<=3;i++){const a=new Arrow(p.x+p.w/2,p.y+p.h/2,i*3,-5+Math.abs(i),25,'player');a.life=60;this.arrows.push(a);setTimeout(()=>SFX.bowShoot(),(i+3)*30);}this.shake.trigger(8,10);}}
-p.vy+=.55*s;p.vy=U.clamp(p.vy,-15,15);p.wallSliding=false;p.onMoss=false;
+// ---- ASYMMETRIC GRAVITY: apex hang + weighty descent ----
+// A single gravity constant produces a symmetric parabola, which reads as floaty on the way up and
+// slow on the way down. Real platformer feel comes from bending that curve: gravity is softened
+// near the apex so there is a beat of hang time to read the landing, and stiffened once you are
+// committed to falling so the descent has weight. Holding DOWN adds a deliberate fast-fall.
+// The apex softening adds only ~4% to jump height, so every existing gap stays exactly as clearable.
+{const rising=p.vy<0,apexHang=!p.gr&&Math.abs(p.vy)<2.6;
+let grav=0.55;
+if(apexHang)grav*=0.55;else if(!rising)grav*=1.26;
+if(!rising&&inp.isDown()&&!p.hang&&!p.climb&&!p.wallSliding)grav*=1.5;
+if(p.wallSliding)grav*=0.5;
+p.vy+=grav*s;}
+p.vy=U.clamp(p.vy,-15,15);p.wallSliding=false;p.onMoss=false;
 // Check moss walls — disable wall-slide and wall-jump if touching
 for(const m of this.mossWalls){if(U.rc({x:p.x-4,y:p.y,w:p.w+8,h:p.h},{x:m.x,y:m.y,w:m.w,h:m.h})){p.onMoss=true;break;}}
 if(!p.gr&&p.vy>0){const wt=this.world.getTilesAround(p.x+p.facing*2,p.y,p.w,p.h);let tw=false;for(const t of wt)if(t.type===1&&U.rc({x:p.x+(p.facing===1?p.w:-4),y:p.y,w:4,h:p.h},t)){tw=true;break;}if(tw&&Math.abs(mx)>.3&&!p.onMoss){p.vy=Math.min(p.vy,2);p.wallSliding=true;if(this.fr%4===0)this.particles.emit(p.facing===1?p.x+p.w:p.x,p.y+p.h*0.7,1,{color:'#888',size:2,life:12,gravity:0.02,vxMin:p.facing*-1,vxMax:p.facing*-0.3,vyMin:-0.5,vyMax:0.5});
@@ -1854,7 +2481,8 @@ updateCamera(){const p=this.player,vw=this.vw||canvas.width,vh=this.vh||canvas.h
 const cs=128;for(let cy=Math.floor(this.cam.y/cs);cy<=Math.floor((this.cam.y+vh)/cs);cy++)for(let cx=Math.floor(this.cam.x/cs);cx<=Math.floor((this.cam.x+vw)/cs);cx++)this.world.explored.add(cx+','+cy);}
 
 update(dt){if(this.state!=='playing'||this.paused)return;if(this.ff>0){this.ff-=dt;return;}this.fr++;this.updatePlayer(dt);{const p=this.player;if(!p.hist)p.hist=[];p.hist.unshift({x:p.x,y:p.y,facing:p.facing});if(p.hist.length>10)p.hist.pop();}this.updateArrowTraps(dt);this.updateEnemies(dt);this.updateArrows(dt);this.updateOrbs(dt);this.updateShockwaves(dt);this.updateGlobs(dt);this.updateBombs(dt);this.updateItems(dt);this.updateCrumbles(dt);this.updateCamera();
-for(const v of this.vents)v.update(this,dt);this.spawnAmbient();this.particles.update(dt);this.shake.update(dt);this.ft=this.ft.filter(f=>f.update(dt));this.slashArcs=this.slashArcs.filter(s=>s.update());if(this.levelNameTimer>0)this.levelNameTimer-=dt;
+for(const v of this.vents)v.update(this,dt);this.spawnAmbient();this.particles.update(dt);this.shake.update(dt);this.ft=this.ft.filter(f=>f.update(dt));this.slashArcs=this.slashArcs.filter(s=>s.update(dt));if(this.levelNameTimer>0)this.levelNameTimer-=dt;
+if(this.hitFlash&&this.hitFlash.t>0)this.hitFlash.t-=dt;
 if(this.streakT>0){this.streakT-=dt;if(this.streakT<=0)this.streak=0;}if(this.streakPop>0)this.streakPop-=dt;if(this.fadeT>0)this.fadeT-=dt;if(this.dmgFlash>0)this.dmgFlash-=dt;}
 
 updateShockwaves(dt){const p=this.player;this.shockwaves=this.shockwaves.filter(sw=>{const ok=sw.update(this.world,dt);if(this.fr%2===0)this.particles.emit(sw.x,sw.y-4,1,{color:'#ff9a30',size:2.5,life:10,glow:true,gravity:-0.05,vxMin:-1,vxMax:1,vyMin:-1.5,vyMax:0});if(!ok)return false;if(U.rc({x:sw.x-7,y:sw.y-20,w:14,h:20},{x:p.x,y:p.y,w:p.w,h:p.h})){if(p.inv<=0&&!p.rl){this.playerTakeDmg(sw.dmg,sw.dir);return false;}}return true;});}
@@ -1987,29 +2615,104 @@ if(((x0+vI)&3)===0){const fc=w.theme==='crypt'?'#d090ff':w.theme==='ramparts'?'#
 c.restore();
 }
 
+// ===== VEGETATION =====
+// Two things separate hand-painted foliage from procedural filler. First, *density is not uniform*:
+// plants colonise where there is water and shelter and leave bare stone elsewhere, so a coherent
+// noise field gates how much grows on each tile instead of a per-tile coin flip. Second, foliage is
+// *layered in value*: a dark silhouette mass, a midtone body, then a few bright rim-lit tips. Drawn
+// as flat single-tone strokes it reads as scribble; drawn as three ordered value passes it reads as
+// volume catching light. Both principles are applied to every species below.
 drawVegetation(c,cam,vw,vh){const w=this.world,ts=w.ts,t=Date.now();
-const veg={dungeon:['#2e5a34','#3a7a42','#5aa85a'],sewers:['#2e6a2e','#3a8a3a','#6fd06f'],ramparts:['#4a5a24','#6a7a2e','#9aba44'],castle:['#2a5a44','#367a5a','#4fb090'],crypt:['#3a2a6a','#4e3a8a','#8060d0']}[w.theme]||['#2e5a34','#3a7a42','#5aa85a'];
+// [silhouette, body, rim, bloom]
+const veg={dungeon:['#173a1e','#2f6f37','#5ba85a','#a0ff90'],sewers:['#1a4a1c','#337f33','#6fd06f','#c8ff70'],ramparts:['#33401a','#5f7326','#9aba44','#ffcf5a'],castle:['#153e30','#2a6f55','#4fb090','#7fffe0'],crypt:['#281c4c','#463079','#8060d0','#e070ff']}[w.theme]||['#173a1e','#2f6f37','#5ba85a','#a0ff90'];
 const sx0=Math.max(0,Math.floor(cam.x/ts)),ex=Math.min(w.tw-1,Math.floor((cam.x+vw)/ts)+1),sy0=Math.max(0,Math.floor(cam.y/ts)),ey=Math.min(w.th-1,Math.floor((cam.y+vh)/ts)+1);
-for(let ty=sy0;ty<=ey;ty++)for(let tx=sx0;tx<=ex;tx++){const tt=w.tiles[ty]&&w.tiles[ty][tx];if(tt!==1&&tt!==2)continue;const px=tx*ts-cam.x,py=ty*ts-cam.y,hsh=(tx*131+ty*57)&15;
-const topOpen=tt===2||!(w.tiles[ty-1]&&w.tiles[ty-1][tx]===1);
-const botOpen=!(w.tiles[ty+1]&&(w.tiles[ty+1][tx]===1||w.tiles[ty+1][tx]===2));
-// top grass tufts + occasional flowering clump / fern
-if(topOpen&&hsh<11){const cnt=3+(hsh%3);for(let i=0;i<cnt;i++){const gx=px+3+((hsh*7+i*11)%(ts-6)),gh=4+((hsh+i*5)%6),sw=Math.sin(t/600+tx+i)*1.5;c.strokeStyle=i%2?veg[1]:veg[2];c.lineWidth=1.5;c.beginPath();c.moveTo(gx,py);c.quadraticCurveTo(gx+sw,py-gh*0.6,gx+sw*1.6,py-gh);c.stroke();}
-// small fern on some ledges
-if(hsh<4){const fx=px+ts*0.5+((tx*5)&7)-3;c.strokeStyle=veg[1];c.lineWidth=1.3;for(let f=-2;f<=2;f++){const a=-Math.PI/2+f*0.42,ln=7+((tx+f)&3);c.beginPath();c.moveTo(fx,py);c.quadraticCurveTo(fx+Math.cos(a)*ln*0.5,py+Math.sin(a)*ln*0.6,fx+Math.cos(a)*ln,py+Math.sin(a)*ln);c.stroke();}}
-// glowing blossom
-if(hsh===2){const bx2=px+8+((tx*3)&12),by2=py-6-((ty*2)&3);c.save();c.globalCompositeOperation='lighter';const bc=w.theme==='crypt'?'#e070ff':w.theme==='ramparts'?'#ffcf5a':w.theme==='castle'?'#7fffe0':'#a0ff90';c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=6;for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2+t/1400;c.beginPath();c.ellipse(bx2+Math.cos(pa)*2.4,by2+Math.sin(pa)*2.4,1.6,1,pa,0,Math.PI*2);c.fill();}c.fillStyle='#fff';c.beginPath();c.arc(bx2,by2,1.1,0,Math.PI*2);c.fill();c.restore();}}
-// dense hanging vines — from the plank underside on platforms, tile bottom on ledges
-if(tt===2||(botOpen&&hsh<9)){const vv=(tx*23+ty*47)&3;const strands=tt===2?2:1,voy=(tt===2?py+7:py+ts-2);for(let sI=0;sI<strands;sI++){const vx=px+5+((hsh+sI*5)%3)*9+sI*3,len=(vv===2?14:10)+((tx*13+ty*7+sI*29)&17),sway=Math.sin(t/700+tx*0.5+sI)*(vv===3?4.5:3.2);
-c.strokeStyle=veg[0];c.lineWidth=vv===2?3:vv===3?1.3:2;c.beginPath();c.moveTo(vx,voy);c.quadraticCurveTo(vx+sway*0.5,voy+len*0.6,vx+sway,voy+len);c.stroke();
-if(vv!==3){c.fillStyle=veg[1];const lc=vv===2?2:4;for(let l=0;l<lc;l++){const lt=(l+1)/(lc+1),lx=vx+sway*lt,ly=voy+len*lt;c.beginPath();c.ellipse(lx+(l%2?3.2:-3.2),ly,vv===2?4:3.2,vv===2?2.6:1.9,l%2?0.6:-0.6,0,Math.PI*2);c.fill();if(l%2&&vv===0){c.fillStyle=veg[2];c.beginPath();c.ellipse(lx-3,ly+2,2.2,1.3,-0.5,0,Math.PI*2);c.fill();c.fillStyle=veg[1];}}}
-if(vv===1){const fc=w.theme==='crypt'?'#d090ff':w.theme==='ramparts'?'#ffcf5a':'#ff9fd0';c.save();c.fillStyle=fc;c.shadowColor=fc;c.shadowBlur=5;for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2;c.beginPath();c.ellipse(vx+sway+Math.cos(pa)*2.4,voy+len+Math.sin(pa)*2.4,1.5,1,pa,0,Math.PI*2);c.fill();}c.fillStyle='#fff';c.beginPath();c.arc(vx+sway,voy+len,1,0,Math.PI*2);c.fill();c.restore();}
-else if(vv===3){c.strokeStyle=veg[1];c.lineWidth=1.2;c.beginPath();c.arc(vx+sway,voy+len-1,2.4,-0.4,Math.PI*1.5);c.stroke();}
-else if(((tx+sI)&3)===0){c.save();c.globalCompositeOperation='lighter';const bc=w.theme==='crypt'?'#c060ff':'#9fff70';c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=5;c.beginPath();c.arc(vx+sway,voy+len,2,0,Math.PI*2);c.fill();c.restore();}}}
+for(let ty=sy0;ty<=ey;ty++)for(let tx=sx0;tx<=ex;tx++){const tt=w.tiles[ty]&&w.tiles[ty][tx];if(tt!==1&&tt!==2)continue;
+const px=tx*ts-cam.x,py=ty*ts-cam.y;
+// ---- the growth field: how hospitable this spot is, 0..1, varying smoothly over the map ----
+const lush=w.nLush[ty*w.tw+tx];
+if(lush<0.30)continue;                                  // bare stone — genuinely nothing grows here
+const dens=U.clamp((lush-0.30)/0.42,0,1);
+// ---- clearance checks: plants may only occupy air, never grow into neighbouring geometry ----
+// (Previously grass could sprout up into the underside of a platform stacked one tile above, and
+//  vines could hang straight through a floor. Both are the sort of small intersection that quietly
+//  makes a scene look procedurally assembled rather than built.)
+const above=w.tiles[ty-1]&&w.tiles[ty-1][tx];
+const topOpen=(tt===2?(above!==1&&above!==2):above!==1)&&!(w.tiles[ty-1]&&w.tiles[ty-1][tx]===2);
+const belowT=w.tiles[ty+1]&&w.tiles[ty+1][tx];
+const botOpen=belowT!==1&&belowT!==2;
+// how much free air there is below, so a hanging strand is never longer than the gap it hangs in
+let clearBelow=0;for(let k=1;k<=3;k++){const r2=w.tiles[ty+k];if(r2&&(r2[tx]===1||r2[tx]===2))break;clearBelow++;}
+const maxHang=clearBelow*ts-6;
+const rnd=(k)=>NZ.h2(tx,ty,k);
+// ================= GROUND COVER on an exposed top surface =================
+if(topOpen){
+ const cnt=2+Math.round(dens*5);
+ // pass 1 — dark silhouette mass hugging the stone, the "shadow root" of the clump
+ c.fillStyle=veg[0];c.beginPath();c.moveTo(px,py+1);
+ for(let i=0;i<=6;i++){const gx=px+i*(ts/6);c.lineTo(gx,py-1-NZ.v2(gx*0.14,ty,53)*5*dens);}
+ c.lineTo(px+ts,py+1);c.closePath();c.fill();
+ // pass 2 — blades. Each is a tapered wedge, not a stroke, so it has a thick base and a fine tip,
+ // and each sways on its own phase so the clump breathes instead of waving as one rigid unit.
+ for(let i=0;i<cnt;i++){const gx=px+2+rnd(i*3+1)*(ts-4);
+  const gh=(5+rnd(i*3+2)*9)*(0.55+dens*0.6),lean=(rnd(i*3+3)-0.5)*6;
+  const sw=Math.sin(t/700+tx*0.7+i*1.9)*(1.2+dens*1.6);
+  const tipx=gx+lean+sw,tipy=py-gh,bw=1.1+dens*0.9;
+  c.fillStyle=i%3===0?veg[2]:veg[1];
+  c.beginPath();c.moveTo(gx-bw,py+1);
+  c.quadraticCurveTo(gx+lean*0.4+sw*0.4,py-gh*0.55,tipx,tipy);
+  c.quadraticCurveTo(gx+lean*0.4+sw*0.4+bw*0.7,py-gh*0.5,gx+bw,py+1);
+  c.closePath();c.fill();}
+ // pass 3 — a broad-leafed shrub where the field is richest: overlapping rounded fronds
+ if(dens>0.55){const fx=px+4+rnd(11)*(ts-8);
+  for(let f=-3;f<=3;f++){const a=-Math.PI/2+f*0.34,ln=(7+rnd(f+20)*7)*dens;
+   const bend=Math.sin(t/900+tx+f)*0.10;
+   c.fillStyle=Math.abs(f)>=2?veg[0]:(f===0?veg[2]:veg[1]);
+   c.beginPath();c.ellipse(fx+Math.cos(a+bend)*ln*0.85,py+Math.sin(a+bend)*ln*0.85,ln*0.5,2.2,a+bend,0,Math.PI*2);c.fill();}}
+ // pass 4 — bioluminescent blossom, the accent that catches the eye
+ if(dens>0.78&&rnd(31)>0.55){const bx2=px+5+rnd(33)*(ts-10),by2=py-7-rnd(34)*5;
+  c.save();c.globalCompositeOperation='lighter';const bc=veg[3];c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=6;
+  for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2+t/1600;c.beginPath();c.ellipse(bx2+Math.cos(pa)*2.4,by2+Math.sin(pa)*2.4,1.7,1.05,pa,0,Math.PI*2);c.fill();}
+  c.fillStyle='#fff';c.beginPath();c.arc(bx2,by2,1.2,0,Math.PI*2);c.fill();c.restore();}
+}
+// ================= HANGING GROWTH from an underside =================
+if((tt===2||botOpen)&&maxHang>6){
+ const voy=(tt===2?py+7:py+ts-2);
+ const strands=1+Math.round(dens*2.4);
+ for(let sI=0;sI<strands;sI++){
+  const vx=px+3+rnd(sI*5+40)*(ts-6);
+  // stems hang longer where the field is rich, and each has its own species pulled from the field
+  const species=Math.floor(NZ.v2(vx*0.05,ty*0.3,91)*4);
+  const len=Math.min(maxHang,(9+rnd(sI*5+41)*20)*(0.5+dens*0.9));
+  const sway=Math.sin(t/760+tx*0.5+sI*2.1)*(2.4+dens*3.2);
+  // dark stem first, so the leaves that follow read as sitting in front of it
+  c.strokeStyle=veg[0];c.lineWidth=species===2?3:species===3?1.3:2;
+  c.beginPath();c.moveTo(vx,voy);c.quadraticCurveTo(vx+sway*0.45,voy+len*0.6,vx+sway,voy+len);c.stroke();
+  if(species!==3){
+   const lc=species===2?3:5;
+   for(let l=0;l<lc;l++){const lt=(l+1)/(lc+1),lx=vx+sway*lt,ly=voy+len*lt;
+    const side=l%2?1:-1,lw=(species===2?4.2:3.4)*(0.7+dens*0.5);
+    c.fillStyle=veg[1];c.beginPath();c.ellipse(lx+side*3.2,ly,lw,lw*0.62,side*0.6,0,Math.PI*2);c.fill();
+    // rim-lit sliver on the upper edge of every other leaf — the light-catching pass
+    if(l%2===0){c.fillStyle=veg[2];c.beginPath();c.ellipse(lx+side*3.6,ly-0.9,lw*0.6,lw*0.3,side*0.6,0,Math.PI*2);c.fill();}}}
+  else{c.strokeStyle=veg[2];c.lineWidth=1.2;c.beginPath();c.arc(vx+sway,voy+len-1,2.4,-0.4,Math.PI*1.5);c.stroke();}
+  // flower or spore at the tip of the richest strands
+  if(species===1&&dens>0.5){const fc=veg[3];c.save();c.globalCompositeOperation='lighter';c.fillStyle=fc;c.shadowColor=fc;c.shadowBlur=5;
+   for(let pI=0;pI<5;pI++){const pa=pI/5*Math.PI*2;c.beginPath();c.ellipse(vx+sway+Math.cos(pa)*2.4,voy+len+Math.sin(pa)*2.4,1.5,1,pa,0,Math.PI*2);c.fill();}
+   c.fillStyle='#fff';c.beginPath();c.arc(vx+sway,voy+len,1,0,Math.PI*2);c.fill();c.restore();}
+  else if(species===0&&dens>0.7){c.save();c.globalCompositeOperation='lighter';const bc=veg[3];c.fillStyle=bc;c.shadowColor=bc;c.shadowBlur=5;c.beginPath();c.arc(vx+sway,voy+len,2,0,Math.PI*2);c.fill();c.restore();}
+ }}
 }}
 drawPost(c){const W=canvas.width,H=canvas.height,pal=BG.pal;if(!pal)return;
 // cinematic color grade — wash shadows toward the biome's atmospheric hue
-c.save();c.globalCompositeOperation='soft-light';c.globalAlpha=0.42;c.fillStyle='rgb('+pal.haze+')';c.fillRect(0,0,W,H);c.restore();
+c.save();c.globalCompositeOperation='soft-light';c.globalAlpha=0.22;c.fillStyle='rgb('+pal.haze+')';c.fillRect(0,0,W,H);c.restore();
+// Contrast lift: deepen the top and bottom of the frame so the atmospheric passes above cannot
+// flatten the whole image into one mid-value wash. Deliberately a plain source-over fill rather
+// than the `multiply` this would naturally be written as — non-source-over blend modes force the
+// compositor to read the destination back for every pixel, and a second full-screen one of those
+// measured as costly as the entire rest of the frame. A darkening gradient reproduces almost all
+// of the visible effect (the highlights are re-supplied by the additive light pass) for free.
+if(!this._ctrGrad||this._ctrH!==H){this._ctrH=H;const cg=c.createLinearGradient(0,0,0,H);cg.addColorStop(0,'rgba(0,0,0,0.30)');cg.addColorStop(0.42,'rgba(0,0,0,0.03)');cg.addColorStop(1,'rgba(0,0,0,0.34)');this._ctrGrad=cg;}
+c.fillStyle=this._ctrGrad;c.fillRect(0,0,W,H);
 // gentle warm/cool split: lift top toward the ray colour (static gradient — cached, only rebuilt on resize / biome change)
 if(!this._splitGrad||this._splitH!==H||this._splitRay!==pal.ray){this._splitH=H;this._splitRay=pal.ray;const sg=c.createLinearGradient(0,0,0,H);sg.addColorStop(0,pal.ray+'1)');sg.addColorStop(0.6,'rgba(0,0,0,0)');sg.addColorStop(1,'rgba(0,0,0,0.5)');this._splitGrad=sg;}
 c.save();c.globalCompositeOperation='overlay';c.globalAlpha=0.14;c.fillStyle=this._splitGrad;c.fillRect(0,0,W,H);c.restore();
@@ -2032,14 +2735,14 @@ c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.3;c.imageSmoothing
 }
 const t=Date.now();
 // ---- light atmospheric haze veil: soft breathing mist layered for volumetric depth (per-biome density) ----
-{const thH=this.world.theme;const hz=thH==='crypt'?0.085:thH==='castle'?0.08:thH==='sewers'?0.05:thH==='ramparts'?0.058:0.066;
+{const thH=this.world.theme;const hz=thH==='crypt'?0.05:thH==='castle'?0.048:thH==='sewers'?0.03:thH==='ramparts'?0.036:0.04;
 const breathe=hz*(0.82+0.18*Math.sin(t/3400));
 c.save();c.globalCompositeOperation='screen';
 const _hzN=PERF.fogLayers;for(let i=0;i<_hzN;i++){const yc=H*(0.30+i*0.23)+Math.sin(t/4200+i*2.1)*H*0.045;const a=(breathe*(1-i*0.17)).toFixed(3);const band=c.createLinearGradient(0,yc-H*0.30,0,yc+H*0.30);band.addColorStop(0,'rgba('+pal.haze+',0)');band.addColorStop(0.5,'rgba('+pal.haze+','+a+')');band.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=band;c.fillRect(0,yc-H*0.30,W,H*0.60);}
 c.restore();}
 // soft volumetric light shafts through the ruins
 c.save();c.globalCompositeOperation='lighter';
-for(let i=0;i<2;i++){const bx=W*(0.28+i*0.42)+Math.sin(t/6000+i*2)*W*0.04,bwd=W*0.13;const bg2=c.createLinearGradient(bx,0,bx-W*0.1,H);bg2.addColorStop(0,pal.ray+(0.05+Math.sin(t/2600+i)*0.02).toFixed(3)+')');bg2.addColorStop(1,pal.ray+'0)');c.fillStyle=bg2;c.beginPath();c.moveTo(bx,0);c.lineTo(bx+bwd,0);c.lineTo(bx+bwd-W*0.14,H);c.lineTo(bx-W*0.14,H);c.closePath();c.fill();}
+for(let i=0;i<2;i++){const bx=W*(0.28+i*0.42)+Math.sin(t/6000+i*2)*W*0.04,bwd=W*0.11;const bg2=c.createLinearGradient(bx,0,bx-W*0.1,H*0.8);bg2.addColorStop(0,pal.ray+(0.026+Math.sin(t/2600+i)*0.010).toFixed(3)+')');bg2.addColorStop(1,pal.ray+'0)');c.fillStyle=bg2;c.beginPath();c.moveTo(bx,0);c.lineTo(bx+bwd,0);c.lineTo(bx+bwd-W*0.14,H);c.lineTo(bx-W*0.14,H);c.closePath();c.fill();}
 c.restore();
 // glowing abyss / mist rising from below
 c.save();c.globalCompositeOperation='lighter';const ab=c.createLinearGradient(0,H,0,H*0.7);ab.addColorStop(0,pal.horizon+(0.12+Math.sin(t/1700)*0.03).toFixed(3)+')');ab.addColorStop(1,pal.horizon+'0)');c.fillStyle=ab;c.fillRect(0,H*0.7,W,H*0.3);c.restore();
@@ -2086,27 +2789,56 @@ drawLighting(c,cam,zoom){
 // its resolution is the biggest low-risk saving — especially on fill-rate-bound mobile GPUs.
 const ls=0.5,LW=Math.max(1,canvas.width>>1),LH=Math.max(1,canvas.height>>1);
 if(lightC.width!==LW||lightC.height!==LH){lightC.width=LW;lightC.height=LH;}
-const dark={dungeon:0.45,sewers:0.5,ramparts:0.38,castle:0.42,crypt:0.55}[this.world.theme]||0.45;
+// Ambient darkness per biome. Pushed deliberately deep: unlit stone should be genuinely dark so
+// that torchlight, cells-glow and enemy eyes carry the composition instead of competing with a
+// uniformly legible background. Everything gameplay-critical is a light source, so nothing hides.
+const dark={dungeon:0.66,sewers:0.68,ramparts:0.56,castle:0.62,crypt:0.74}[this.world.theme]||0.66;
 lctx.globalCompositeOperation='source-over';lctx.globalAlpha=1;lctx.clearRect(0,0,LW,LH);
-lctx.fillStyle=`rgba(3,5,12,${dark})`;lctx.fillRect(0,0,LW,LH);
+// Shadows carry a trace of the biome's atmospheric hue rather than being neutral black — coloured
+// shadow keeps deep darkness from reading as a dead grey hole. But only a trace: the tint is
+// crushed to ~28% of the haze value first, because a shadow layer bright enough to see its own
+// colour at this opacity would flood the frame and destroy the value range it exists to protect.
+if(!this._shTint||this._shTintSrc!==(BG.pal&&BG.pal.haze)){this._shTintSrc=BG.pal&&BG.pal.haze;
+  const hz=(BG.pal?BG.pal.haze:'3,5,12').split(',').map(v=>Math.round(parseFloat(v)*0.28));
+  this._shTint=hz.join(',');}
+lctx.fillStyle=`rgba(${this._shTint},${dark})`;lctx.fillRect(0,0,LW,LH);
 lctx.globalCompositeOperation='destination-out';
 // Every light source reuses one baked radial mask via drawImage (a cheap GPU texture blit)
 // instead of allocating + rasterising a fresh radial gradient per source per frame. The mask's
 // alpha profile matches the original gradient's stops exactly, so the look is unchanged; this
 // is a pure win that scales with the number of on-screen lights (torches, enemies, items).
-const cut=(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom*ls,sy=(wy-cam.y)*zoom*ls,sr=r*zoom*ls;if(sx<-sr||sx>LW+sr||sy<-sr||sy>LH+sr)return;lctx.globalAlpha=a;lctx.drawImage(_lightMask,sx-sr,sy-sr,sr*2,sr*2);};
+// Each source is collected once and then used twice: to punch a hole in the darkness (subtractive)
+// and to lay coloured light back on top (additive). Cutting alone only ever reveals the underlying
+// paint, so torches read as "less dark" rather than as fire. Adding the source's own hue on top is
+// what gives the warm pools of flame-light against cold stone that define the look.
+const src=[];
+const cut=(wx,wy,r,a,col)=>{const sx=(wx-cam.x)*zoom*ls,sy=(wy-cam.y)*zoom*ls,sr=r*zoom*ls;if(sx<-sr||sx>LW+sr||sy<-sr||sy>LH+sr)return;lctx.globalAlpha=a;lctx.drawImage(_lightMask,sx-sr,sy-sr,sr*2,sr*2);if(col)src.push({x:(wx-cam.x)*zoom,y:(wy-cam.y)*zoom,r:r*zoom,a,col});};
 const t=Date.now(),p=this.player;
-cut(p.x+p.w/2,p.y+p.h*0.4,150,1);
-for(const d of this.decos){if(d.type==='torch')cut(d.x+16,d.y-18,120+Math.sin(t/90+d.x)*9,0.95);else if(d.type==='lantern')cut(d.x+16,d.y-12,110,0.9);else if(d.type==='brazier')cut(d.x+16,d.y-6,120+Math.sin(t/80+d.x)*10,0.95);else if(d.type==='candle')cut(d.x+16,d.y-4,52,0.7);else if(d.type==='crystal')cut(d.x+16,d.y+2,80,0.7);else if(d.type==='mushroom')cut(d.x+14,d.y+6,55,0.6);}
-if(!this.bossGate)cut(this.portalPos.x+16,this.portalPos.y+16,110,0.9);
-for(const v of this.vents)if(v.timer<v.onT)cut(v.x+16,v.y-30,105,0.9);
-for(const o of this.orbs)cut(o.x,o.y,55,0.8);
-for(const en of this.enemies){if(!en.alive)continue;if(en.wisp)cut(en.x+7,en.y+7,60,0.8);else if(en.boss&&en.enraged)cut(en.x+en.w/2,en.y+en.h/2,115,0.7);else if(en.caster||en.reaper)cut(en.x+en.w/2,en.y+en.h/2,60,0.5);}
-for(const it of this.items)if(it.type==='cell')cut(it.x+6,it.y+6,34,0.55);
-for(const ch of this.chests)if(ch.cursed&&!ch.opened)cut(ch.x+13,ch.y+8,60,0.6);
-for(const sw of this.shockwaves)cut(sw.x,sw.y-6,50,0.85);
+cut(p.x+p.w/2,p.y+p.h*0.4,150,1,null);
+for(const d of this.decos){if(d.type==='torch')cut(d.x+16,d.y-18,120+Math.sin(t/90+d.x)*9,0.95,'#ff8c2e');else if(d.type==='lantern')cut(d.x+16,d.y-12,110,0.9,'#ffb648');else if(d.type==='brazier')cut(d.x+16,d.y-6,120+Math.sin(t/80+d.x)*10,0.95,'#ff7a1e');else if(d.type==='candle')cut(d.x+16,d.y-4,52,0.7,'#ffc060');else if(d.type==='crystal')cut(d.x+16,d.y+2,80,0.7,this.world.theme==='crypt'?'#b070ff':'#5ad8ff');else if(d.type==='mushroom')cut(d.x+14,d.y+6,55,0.6,'#3adfa8');}
+if(!this.bossGate)cut(this.portalPos.x+16,this.portalPos.y+16,110,0.9,'#40ffc0');
+for(const v of this.vents)if(v.timer<v.onT)cut(v.x+16,v.y-30,105,0.9,'#ff9030');
+for(const o of this.orbs)cut(o.x,o.y,55,0.8,o.owner==='player'?'#8cf':'#c060ff');
+for(const en of this.enemies){if(!en.alive)continue;if(en.wisp)cut(en.x+7,en.y+7,60,0.8,'#be82ff');else if(en.boss&&en.enraged)cut(en.x+en.w/2,en.y+en.h/2,115,0.7,'#ff4020');else if(en.caster||en.reaper)cut(en.x+en.w/2,en.y+en.h/2,60,0.5,'#c060ff');}
+for(const it of this.items)if(it.type==='cell')cut(it.x+6,it.y+6,34,0.55,'#2effc0');
+for(const ch of this.chests)if(ch.cursed&&!ch.opened)cut(ch.x+13,ch.y+8,60,0.6,'#c04cff');
+for(const sw of this.shockwaves)cut(sw.x,sw.y-6,50,0.85,'#ff9a30');
 lctx.globalAlpha=1;lctx.globalCompositeOperation='source-over';
 c.drawImage(lightC,0,0,canvas.width,canvas.height);
+// ---- additive colour pass ----
+c.save();c.globalCompositeOperation='lighter';
+// Full quality lays down two blits per source — a wide faint bloom plus a tight bright core, which
+// approximates a real falloff curve. Reduced tiers keep only the core: the light pools still read,
+// at half the additive fill-rate, which is the resource weak GPUs actually run out of.
+const _wide=PERF.tier===0;
+for(const s of src){const g=glowSprite(s.col);
+  if(_wide){c.globalAlpha=s.a*0.20;c.drawImage(g,s.x-s.r,s.y-s.r,s.r*2,s.r*2);}
+  c.globalAlpha=s.a*(_wide?0.24:0.34);c.drawImage(g,s.x-s.r*0.5,s.y-s.r*0.5,s.r,s.r);}
+// the player's own cells-flame casts a cool key light that keeps the silhouette readable in the dark
+{const pg=glowSprite(p.hp/p.mhp>0.5?'#2ee6ff':p.hp/p.mhp>0.25?'#ffb020':'#ff5030');
+ const px=(p.x+p.w/2-cam.x)*zoom,py=(p.y+p.h*0.28-cam.y)*zoom,pr=118*zoom;
+ c.globalAlpha=0.17;c.drawImage(pg,px-pr,py-pr,pr*2,pr*2);}
+c.restore();
 }
 
 updateGlobs(dt){const p=this.player;
@@ -2124,7 +2856,10 @@ pollGamepad(){try{const gps=navigator.getGamepads?navigator.getGamepads():null;c
 draw(){const c=ctx;c.clearRect(0,0,canvas.width,canvas.height);if(this.state==='loading'||this.state==='menu')return;const cam = {
   x: Math.floor(this.cam.x + this.shake.x),
   y: Math.floor(this.cam.y + this.shake.y)
-};const zoom=this.zoom=U.clamp(canvas.height/330,1.35,2.05);const vw=this.vw=canvas.width/zoom,vh=this.vh=canvas.height/zoom;const lvls=getAllLevels(),ld=lvls[this.lvl%lvls.length];c.save();c.scale(zoom,zoom);BG.draw(c,cam,this.world,this.world.theme,this.fr,vw,vh);this.drawArches(c,cam,vw,vh);this.world.draw(c,cam,vw,vh);this.drawCrumbles(c,cam);this.drawVegetation(c,cam,vw,vh);
+};// A slightly tighter frame than before. With the slower pacing there is time to read the space, so
+// the camera can afford to trade a little peripheral vision for characters that fill more of the
+// screen — which is what lets the added detail on them actually be seen.
+const zoom=this.zoom=U.clamp(canvas.height/305,1.45,2.25);const vw=this.vw=canvas.width/zoom,vh=this.vh=canvas.height/zoom;const lvls=getAllLevels(),ld=lvls[this.lvl%lvls.length];c.save();c.scale(zoom,zoom);BG.draw(c,cam,this.world,this.world.theme,this.fr,vw,vh);this.drawArches(c,cam,vw,vh);this.world.draw(c,cam,vw,vh);this.drawCrumbles(c,cam);this.drawTerrainProps(c,cam,vw,vh);this.drawVegetation(c,cam,vw,vh);
 const _now=Date.now();for(const d of this.decos){const sx=d.x-cam.x,sy=d.y-cam.y;if(sx<-64||sx>vw+64||sy<-64||sy>vh+64)continue;if(d.type==='torch'){const flick=(Math.sin(_now/90+d.x)+Math.sin(_now/47+d.x*2))*0.5;const fl=flick*2;
 // soft light halo
 c.save();c.globalCompositeOperation='lighter';halo(c,sx+16,sy-20,84+flick*10,'#ff9632',0.34);c.restore();
@@ -2268,17 +3003,53 @@ if(this.player.gr)_sh(this.player.x+this.player.w/2,this.player.y+this.player.h+
 for(const bl of this.barrels)if(bl.alive)_sh(bl.x+bl.w/2,bl.y+bl.h+1,bl.w*0.55);
 for(const ch of this.chests)_sh(ch.x+ch.w/2,ch.y+ch.h+1,ch.w*0.55);
 c.restore();
-// backlight rim — separate characters from the busy background
-if(BG.pal){c.save();c.globalCompositeOperation='lighter';c.fillStyle=BG.pal.mote;const _rim=(ex,ey,rw,rh,a)=>{c.globalAlpha=a;c.beginPath();c.ellipse(ex-cam.x,ey-cam.y,rw,rh,0,0,Math.PI*2);c.fill();};for(const en of this.enemies){if(!en.alive)continue;const s2=en.x-cam.x;if(s2<-60||s2>vw+60)continue;_rim(en.x+en.w/2,en.y+en.h*0.42,en.w*0.62,en.h*0.5,0.1);}_rim(this.player.x+this.player.w/2,this.player.y+this.player.h*0.42,this.player.w*0.7,this.player.h*0.5,0.12);c.restore();}
+// ---- CONTACT SHADOWS ----
+// Nothing makes a 2D actor feel like it is standing *on* a surface more cheaply than a shadow cast
+// onto that surface. The shadow is projected by walking down from the actor's feet to the first
+// solid tile, then scaled and faded by the drop height: tight and dark when grounded, wide and
+// faint at the top of a jump. That single relationship reads instantly as altitude, which also
+// makes platforming easier to judge.
+{const ts2=this.world.ts,tiles=this.world.tiles;
+ const groundBelow=(wx,wy)=>{const cxq=Math.floor(wx/ts2);for(let k=0;k<12;k++){const ryq=Math.floor(wy/ts2)+k;const row=tiles[ryq];if(row&&(row[cxq]===1||row[cxq]===2))return ryq*ts2;}return null;};
+ const shadow=(wx,feetY,wd)=>{const g=groundBelow(wx,feetY+2);if(g===null)return;
+   const drop=U.clamp((g-feetY)/150,0,1),a=(1-drop)*0.42,rw=wd*(0.52+drop*0.85);
+   if(a<=0.02)return;c.globalAlpha=a;c.beginPath();c.ellipse(wx-cam.x,g-cam.y+2,rw,rw*0.30,0,0,Math.PI*2);c.fill();};
+ c.save();c.fillStyle='#000';
+ for(const en of this.enemies){if(!en.alive||en.flying)continue;const s2=en.x-cam.x;if(s2<-60||s2>vw+60)continue;shadow(en.x+en.w/2,en.y+en.h,en.w);}
+ shadow(this.player.x+this.player.w/2,this.player.y+this.player.h,this.player.w);
+ c.restore();}
+// ---- BACKLIGHT RIM ----
+// A soft additive halo hugging each silhouette, tinted with the biome's own key colour. It reads
+// as light wrapping around the figure from the atmosphere behind it, and — more practically — it
+// separates characters from a background that is deliberately busy with masonry and foliage.
+if(BG.pal){c.save();c.globalCompositeOperation='lighter';
+const _rim=(ex,ey,rw,rh,a,col)=>{c.globalAlpha=a;const g=glowSprite(col);c.drawImage(g,ex-cam.x-rw,ey-cam.y-rh,rw*2,rh*2);};
+for(const en of this.enemies){if(!en.alive)continue;const s2=en.x-cam.x;if(s2<-60||s2>vw+60)continue;
+ // hostile figures rim in a warning hue so threats pop out of the murk before you can read detail
+ _rim(en.x+en.w/2,en.y+en.h*0.44,en.w*0.78,en.h*0.60,en.boss||en.type==='elite'?0.17:0.11,en.boss||en.type==='elite'?'#ff6a30':BG.pal.mote);}
+const _php=U.clamp(this.player.hp/this.player.mhp,0,1);
+_rim(this.player.x+this.player.w/2,this.player.y+this.player.h*0.46,this.player.w*0.86,this.player.h*0.58,0.16,_php>0.5?'#39f0d8':_php>0.25?'#ffb020':'#ff5030');
+c.restore();}
 this.drawTethers(c,cam);
 for(const en of this.enemies){if(!en.alive)continue;const sx=en.x-cam.x;if(sx>-60&&sx<canvas.width+60)en.draw(c,cam);}
 for(const sa of this.slashArcs)sa.draw(c,cam);
+// impact flash pinned to the contact point — a hot white kernel inside a coloured bloom
+if(this.hitFlash&&this.hitFlash.t>0){const hf=this.hitFlash,a=hf.t/hf.mt,fx=hf.x-cam.x,fy=hf.y-cam.y,r=hf.r*(1.5-a*0.5);
+c.save();c.globalCompositeOperation='lighter';
+c.globalAlpha=a*a*0.34;c.drawImage(glowSprite(hf.col),fx-r*1.8,fy-r*1.8,r*3.6,r*3.6);
+c.globalAlpha=a*a*0.8;c.fillStyle='#ffffff';c.beginPath();c.arc(fx,fy,r*0.28*a,0,Math.PI*2);c.fill();
+// four-point star flare — the classic impact read, kept thin so it never masks the character
+c.strokeStyle='#ffffff';c.lineWidth=1.4*a;c.globalAlpha=a*a*0.55;
+c.beginPath();c.moveTo(fx-r*1.9*a,fy);c.lineTo(fx+r*1.9*a,fy);c.moveTo(fx,fy-r*1.3*a);c.lineTo(fx,fy+r*1.3*a);c.stroke();
+c.restore();}
 {const plx=this.player.x+this.player.w/2-cam.x,ply=this.player.y+this.player.h*0.35-cam.y;c.save();c.globalCompositeOperation='lighter';const lg=c.createRadialGradient(plx,ply,4,plx,ply,100);lg.addColorStop(0,'rgba(30,210,190,0.16)');lg.addColorStop(.5,'rgba(0,170,220,0.06)');lg.addColorStop(1,'rgba(0,160,220,0)');c.fillStyle=lg;c.beginPath();c.arc(plx,ply,100,0,Math.PI*2);c.fill();c.restore();}
 if(this.state==='playing'){c.save();if(this.player.inv>0)c.globalAlpha=.5+Math.sin(this.player.inv*8)*.3;this.drawPlayer(c,cam);c.restore();}
 for(const ar of this.arrows)ar.draw(c,cam);for(const o of this.orbs)o.draw(c,cam);for(const sw of this.shockwaves)sw.draw(c,cam);for(const g2 of this.globs)g2.draw(c,cam);this._zoomNow=zoom;this._camNow=cam;
 for(const pl of this.pools){const px2=pl.x-cam.x,py2=pl.y-cam.y;if(px2>-50&&px2<canvas.width+50){const a=Math.min(1,pl.life/60);c.save();c.globalAlpha=a*0.85;c.fillStyle='#4a8a20';c.beginPath();c.ellipse(px2+pl.w/2,py2+4,pl.w/2,4,0,0,Math.PI*2);c.fill();c.fillStyle='#7fd030';c.beginPath();c.ellipse(px2+pl.w/2,py2+3,pl.w/2-3,2.5,0,0,Math.PI*2);c.fill();c.globalCompositeOperation='lighter';c.fillStyle='rgba(160,255,80,0.25)';c.beginPath();c.ellipse(px2+pl.w/2,py2+2,pl.w/2,5,0,0,Math.PI*2);c.fill();c.restore();}}
 for(const v of this.vents)v.draw(c,cam);
-for(const b of this.bombs)b.draw(c,cam);this.particles.draw(c,cam);for(const f of this.ft)f.draw(c,cam);c.restore();this.drawLighting(c,cam,zoom);this.drawPost(c);this.drawHUD(c);
+for(const b of this.bombs)b.draw(c,cam);this.particles.draw(c,cam);
+this.drawForeground(c,cam,vw,vh);
+for(const f of this.ft)f.draw(c,cam);c.restore();this.drawLighting(c,cam,zoom);this.drawPost(c);this.drawHUD(c);
 if(!this._vgA||this._vgAW!==canvas.width||this._vgAH!==canvas.height){this._vgAW=canvas.width;this._vgAH=canvas.height;const vg=c.createRadialGradient(canvas.width/2,canvas.height/2,canvas.width*.3,canvas.width/2,canvas.height/2,canvas.width*.66);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.22)');this._vgA=vg;}
 c.fillStyle=this._vgA;c.fillRect(0,0,canvas.width,canvas.height);
 if(BG.pal){if(!this._gr2||this._gr2H!==canvas.height||this._gr2Ray!==BG.pal.ray){this._gr2H=canvas.height;this._gr2Ray=BG.pal.ray;const gr2=c.createLinearGradient(0,0,0,canvas.height*0.5);gr2.addColorStop(0,BG.pal.ray+'0.06)');gr2.addColorStop(1,BG.pal.ray+'0)');this._gr2=gr2;}c.save();c.globalCompositeOperation='lighter';c.fillStyle=this._gr2;c.fillRect(0,0,canvas.width,canvas.height*0.5);c.restore();}
@@ -2323,7 +3094,20 @@ return;}
 const moving=Math.abs(p.vx)>0.4&&p.gr;const rc=Math.sin(t/70);const flick=0.8+Math.sin(t/80)*0.2;
 c.save();c.translate(x+w/2,y+h/2);if(d===-1)c.scale(-1,1);
 if(p.sqx&&(Math.abs(p.sqx-1)>0.01||Math.abs(p.sqy-1)>0.01)){c.translate(0,(h/2)*(1-p.sqy));c.scale(p.sqx,p.sqy);}
-if(p.atk){const cs=p.comboStep||0,pr=U.clamp(p.at/p.ad,0,1);if(cs===2){const ce=pr<0.32?-(pr/0.32)*0.18:((pr-0.32)/0.68);c.rotate(ce*0.5);}else{c.rotate(Math.sin(pr*Math.PI)*(cs===1?-.20:.24));}}
+// ---- COMBO BODY MOTION: the torso leads the blade, so each beat has its own posture ----
+if(p.atk&&p.weapons[p.cw].type==='sword'){const cs=U.clamp(p.comboStep|0,0,3),cd=COMBO[cs],pr=U.clamp(p.at/p.ad,0,1);
+// e goes -1 during the wind-up (coil back) then 0..1 through the strike (uncoil forward)
+const e=pr<cd.wind?-(1-pr/cd.wind):Math.pow((pr-cd.wind)/(1-cd.wind),0.55);
+if(cd.shape==='ring'){
+  // Moonfall: the whole body whips through a full revolution
+  c.rotate((e<0?e*0.22:e*Math.PI*2)*d*0.5*(d===-1?1:1));
+  c.translate(0,-Math.sin(U.clamp(e,0,1)*Math.PI)*4);
+}else if(cd.shape==='stab'){
+  // Impale: no rotation, a hard forward shift of the whole frame
+  c.translate(e*6,0);c.rotate(e*0.10);c.scale(1+Math.max(0,e)*0.06,1-Math.max(0,e)*0.05);
+}else{
+  c.rotate(e*(cs===1?-0.26:0.28));c.translate(e*2.5,0);
+}}
 if(p.rl){c.rotate(p.rlt/p.rld*Math.PI*2*p.facing);}
 if(p.wjSpin>0&&!p.rl){c.rotate((1-p.wjSpin/16)*Math.PI*2*p.facing);}
 if(p.wallSliding)c.scale(0.86,1.08);
@@ -2331,24 +3115,46 @@ if(p.hang){c.rotate(-0.12*p.facing);c.scale(1,1.06);}
 if(p.sneak){c.translate(0,h*0.16);c.scale(1.12,0.68);c.globalAlpha*=0.9;}
 const bob=p.gr?(moving?Math.abs(Math.sin(t/70))*1.4:(p.sneak?Math.sin(t/500)*0.4:Math.sin(t/380))):0;
 // ---- CAPE ----
-const cwv=Math.sin(t/220)*3+p.vx*-0.7;
-c.fillStyle='#26094f';c.beginPath();c.moveTo(-w/2+3,-h/2+7+bob);c.quadraticCurveTo(-w/2-8+cwv,bob+2,-w/2-3+cwv,h/2+3+bob+Math.sin(t/260)*2);c.lineTo(-w/2+8,h/2-1+bob);c.closePath();c.fill();
-c.fillStyle='#3d146f';c.beginPath();c.moveTo(-w/2+4,-h/2+8+bob);c.quadraticCurveTo(-w/2-3+cwv*.7,bob+5,-w/2+cwv*.7,h/2-2+bob);c.lineTo(-w/2+8,h/2-3+bob);c.closePath();c.fill();
+// The cape is driven by the character's own motion, not just a sine: horizontal velocity pushes the
+// hem backward and vertical velocity lifts it, with the sine only supplying idle drift. Cloth that
+// reacts to what the body is doing is the single clearest signal that a sprite is animated rather
+// than merely wiggling, and it costs two extra terms.
+const cwv=Math.sin(t/220)*2.4+p.vx*-1.35+(p.gr?0:U.clamp(-p.vy*0.5,-3,4));
+const capeLift=U.clamp(Math.abs(p.vx)*0.5+(p.gr?0:2),0,6);
+// outer (shadow) fold
+c.fillStyle='#1d0640';c.beginPath();c.moveTo(-w/2+4,-h/2+6+bob);
+c.quadraticCurveTo(-w/2-10+cwv,bob-capeLift,-w/2-5+cwv*1.25,h/2+4+bob+Math.sin(t/260)*2);
+c.quadraticCurveTo(-w/2-1+cwv*0.6,h/2+bob,-w/2+9,h/2-1+bob);c.closePath();c.fill();
+// inner (lit) fold — a narrower panel offset toward the body reads as the lining catching light
+c.fillStyle='#3d146f';c.beginPath();c.moveTo(-w/2+5,-h/2+7+bob);
+c.quadraticCurveTo(-w/2-4+cwv*.7,bob+3-capeLift*0.5,-w/2-1+cwv*.85,h/2-2+bob);
+c.lineTo(-w/2+9,h/2-3+bob);c.closePath();c.fill();
+// rim light along the trailing edge
+c.strokeStyle='rgba(150,90,240,0.55)';c.lineWidth=1.2;c.beginPath();c.moveTo(-w/2+4,-h/2+6+bob);
+c.quadraticCurveTo(-w/2-10+cwv,bob-capeLift,-w/2-5+cwv*1.25,h/2+4+bob);c.stroke();
 // ---- LEGS ----
 c.fillStyle='#12312a';
 if(p.gr&&moving){const la=rc*5;c.save();c.translate(-3,h/2-9+bob);c.rotate(la*0.05);c.fillRect(-2,0,4,10);c.fillStyle='#0d241e';c.fillRect(-3,9,5,3);c.restore();c.fillStyle='#12312a';c.save();c.translate(4,h/2-9+bob);c.rotate(-la*0.05);c.fillRect(-2,0,4,10);c.fillStyle='#0d241e';c.fillRect(-3,9,5,3);c.restore();}
 else if(!p.gr){c.save();c.rotate(0.25);c.fillRect(-6,h/2-9+bob,4,7);c.restore();c.fillRect(2,h/2-7+bob,4,9);}
 else{c.fillRect(-5,h/2-9+bob,4,10);c.fillRect(2,h/2-9+bob,4,10);c.fillStyle='#0d241e';c.fillRect(-6,h/2+1+bob,5,3);c.fillRect(1,h/2+1+bob,5,3);}
 // ---- TORSO ----
-const tg=c.createLinearGradient(0,-h/2,0,h/2);tg.addColorStop(0,'#237a5c');tg.addColorStop(.5,'#0e3a28');tg.addColorStop(1,'#16513c');c.fillStyle=tg;
+// Values are pushed apart deliberately: a bright lit top, a deep core shadow, and a bounce-light
+// warm-up at the hem. Against a dark, busy background a low-contrast figure disappears — the
+// character has to carry its own internal lighting to stay readable.
+const tg=c.createLinearGradient(0,-h/2,0,h/2);tg.addColorStop(0,'#38a87e');tg.addColorStop(.42,'#12472f');tg.addColorStop(1,'#1d6446');c.fillStyle=tg;
 c.beginPath();c.moveTo(-w/2+3,-h/2+7+bob);c.lineTo(w/2-3,-h/2+7+bob);c.lineTo(w/2-2,h/2-8+bob);c.lineTo(-w/2+2,h/2-8+bob);c.closePath();c.fill();
 // tunic shading & straps
-c.fillStyle='rgba(0,0,0,0.22)';c.fillRect(-1,-h/2+8+bob,2,h-17);
+c.fillStyle='rgba(0,0,0,0.30)';c.fillRect(-1,-h/2+8+bob,2.4,h-17);
 c.fillStyle='#0d3325';c.beginPath();c.moveTo(-w/2+3,-h/2+7+bob);c.lineTo(2,-h/2+7+bob);c.lineTo(-3,-h/2+13+bob);c.closePath();c.fill();
+// leading-edge rim light: a bright sliver down the side facing the camera-forward direction
+c.fillStyle='rgba(180,255,230,0.5)';c.fillRect(w/2-3.4,-h/2+7+bob,1.5,h-15);
+c.fillStyle='rgba(0,0,0,0.35)';c.fillRect(-w/2+2.6,-h/2+7+bob,1.4,h-15);
 // belt
 c.fillStyle='#4a2f14';c.fillRect(-w/2+2,-h/2+15+bob,w-4,3);c.fillStyle='#d0a038';c.shadowColor='#a06010';c.shadowBlur=3;c.fillRect(-2,-h/2+15+bob,4,3);c.shadowBlur=0;
-// shoulder pad
-c.fillStyle='#2f8362';c.fillRect(-w/2+1,-h/2+6+bob,w-2,4);c.fillStyle='#3fa078';c.fillRect(-w/2+1,-h/2+6+bob,w-2,1);
+// shoulder pad — a curved pauldron, with its own highlight, rather than a flat bar
+c.fillStyle='#2f8362';c.beginPath();c.ellipse(0,-h/2+8+bob,w/2-0.5,4.4,0,Math.PI,0);c.fill();
+c.fillStyle='#4fbe90';c.beginPath();c.ellipse(1,-h/2+7.4+bob,w/2-2.4,2.2,0,Math.PI,0);c.fill();
+c.fillStyle='#7fe8bc';c.fillRect(2,-h/2+5.4+bob,4.5,1.2);
 if(p.wallSliding){c.fillStyle='#0d3322';c.fillRect(-w/2-4,-h/2+10+bob,4,6);c.fillRect(w/2,-h/2+10+bob,4,6);}
 // ---- BACK ARM ----
 c.fillStyle='#16513c';const bax=Math.sin(t/70+1)*(moving?3:0);c.fillRect(-w/2+1,-h/2+9+bob,4,11);
@@ -2374,20 +3180,34 @@ if(p.onMoss&&p.wallSliding===false&&!p.gr){c.save();c.globalAlpha=0.4;c.strokeSt
 const wep=p.weapons[p.cw];c.save();c.translate(3,-h/2+11+bob);
 let bladeScale=1;
 if(wep.type==='sword'){
-const bl=wep.range*.55,tl=9+bl+5;const cs=p.comboStep||0;
-// swing-angle as a function of progress (windup pull-back then snappy follow-through)
-const A=[[-2.05,1.25],[1.35,-1.85],[-2.6,1.5]][cs]||[-2.05,1.25];
-const swAng=(rt)=>{const prog=rt<0.26?(-(rt/0.26)*0.30):((rt-0.26)/0.74);const pe=prog<0?prog:1-Math.pow(1-prog,2.2);return A[0]+pe*(A[1]-A[0]);};
+const bl=wep.range*.55,tl=9+bl+5;const cs=U.clamp(p.comboStep|0,0,3),cdef=COMBO[cs];
+// Swing angle as a function of swing progress. Real weapon animation is anticipation → a violent
+// acceleration through the contact frame → a slow settle, so the easing is deliberately asymmetric:
+// the wind-up drifts back linearly, then the strike uses a steep power curve that spends most of
+// its angular travel in the first few frames after commit.
+const A=cdef.arc,WIN=cdef.wind;
+const swAng=(rt)=>{
+  if(rt<WIN){const q=rt/WIN;return A[0]-Math.sin(q*Math.PI*0.5)*0.42*Math.sign(A[1]-A[0]);}
+  const q=(rt-WIN)/(1-WIN);const pe=1-Math.pow(1-q,cdef.shape==='ring'?2.8:2.2);
+  return A[0]+pe*(A[1]-A[0]);};
+// Impale is a translation, not a rotation: the arm shoots forward along its own axis.
+const thrustOff=(rt)=>cdef.shape!=='stab'?0:(rt<WIN?-4*(rt/WIN):(1-Math.pow(1-(rt-WIN)/(1-WIN),2.4))*22-4*(1-(rt-WIN)/(1-WIN)));
 if(p.atk){
 const raw=U.clamp(p.at/p.ad,0,1);
-// ---- motion-blur blade trail: bright ghost streaks at earlier swing angles ----
+// ---- motion-blur blade trail: ghost blades at the angles the edge just passed through ----
+// Sampling the real swing curve (rather than a fixed angular offset) means the ghosts bunch where
+// the blade moved slowly and smear where it moved fast — free, physically-honest motion blur.
 c.save();c.globalCompositeOperation='lighter';
-const tcol=cs===2?'#eaf7ff':cs===1?'#a8ecff':'#bfe6ff';
-for(let g=1;g<=6;g++){const rt=raw-g*0.045;if(rt<0.06)break;c.save();c.rotate(swAng(rt));c.globalAlpha=0.20*(1-g/7);
-c.fillStyle=tcol;c.beginPath();c.moveTo(5,-2.4);c.lineTo(tl,0);c.lineTo(5,2.4);c.closePath();c.fill();c.restore();}
+const tcol=cdef.col,ghosts=cdef.shape==='ring'?9:7;
+for(let g=1;g<=ghosts;g++){const rt=raw-g*(cdef.shape==='ring'?0.05:0.038);if(rt<0.02)break;
+c.save();c.rotate(swAng(rt));c.translate(thrustOff(rt),0);c.globalAlpha=0.24*(1-g/(ghosts+1));
+c.fillStyle=tcol;c.beginPath();c.moveTo(5,-2.6);c.lineTo(tl,0);c.lineTo(5,2.6);c.closePath();c.fill();c.restore();}
 c.restore();
-c.rotate(swAng(raw));bladeScale=cs===2?1.32:1.08;
-}else c.rotate(moving?-0.5+Math.sin(t/70)*0.15:-0.5);
+c.rotate(swAng(raw));c.translate(thrustOff(raw),0);
+bladeScale=cdef.shape==='ring'?1.34:cdef.shape==='stab'?1.16:1.08;
+}else{
+// idle/ready pose drifts with the chain: deeper into the combo, the guard is held higher
+c.rotate((moving?-0.5+Math.sin(t/70)*0.15:-0.5)-(p.comboT>0?0.12*cs:0));}
 c.scale(bladeScale,bladeScale);
 c.fillStyle='#1a5c44';c.fillRect(0,-2,9,4);
 // crossguard
@@ -2395,8 +3215,8 @@ c.fillStyle='#c0a050';c.fillRect(6,-5.5,3,11);c.fillStyle='#e8c86a';c.fillRect(6
 // grip pommel
 c.fillStyle='#5a3a1e';c.fillRect(2,-2.2,5,4.4);c.fillStyle='#d9a83a';c.beginPath();c.arc(2,0,2.4,0,Math.PI*2);c.fill();
 // blade — hotter, brighter core during the strike
-const hot=p.atk,edge=cs===2?'#dff3ff':'#eaf6ff';
-const sg=c.createLinearGradient(9,-2.6,9,2.6);sg.addColorStop(0,'#ffffff');sg.addColorStop(.45,hot?edge:'#9fcdf0');sg.addColorStop(1,hot?'#7fb8ff':'#5f8fc0');c.fillStyle=sg;c.shadowColor=cs===2?'#9fe0ff':'#6cf';c.shadowBlur=hot?(cs===2?20:14):6;
+const hot=p.atk,edge=cs>=2?'#dff3ff':'#eaf6ff';
+const sg=c.createLinearGradient(9,-2.6,9,2.6);sg.addColorStop(0,'#ffffff');sg.addColorStop(.45,hot?edge:'#9fcdf0');sg.addColorStop(1,hot?'#7fb8ff':'#5f8fc0');c.fillStyle=sg;c.shadowColor=cs===3?'#9fe0ff':'#6cf';c.shadowBlur=hot?(12+cs*4):6;
 c.beginPath();c.moveTo(9,-2.8);c.lineTo(9+bl-3,-1.7);c.lineTo(tl,0);c.lineTo(9+bl-3,1.7);c.lineTo(9,2.8);c.closePath();c.fill();c.shadowBlur=0;
 c.fillStyle='rgba(20,40,70,0.4)';c.fillRect(11,-0.4,bl-6,0.9);
 // white-hot edge line
@@ -2505,7 +3325,7 @@ c.strokeStyle='rgba(255,255,255,.35)';c.lineWidth=1;c.strokeRect(mx+this.cam.x*s
 
 loop(timestamp){if(!this.lastTime)this.lastTime=timestamp;const elapsed=Math.min(timestamp-this.lastTime,100);this.lastTime=timestamp;PERF.sample(elapsed);this.accumulator+=elapsed;this.pollGamepad();
 // clamp the physics catch-up so a hitch can never spiral into a long blocking loop of updates
-let _steps=0;while(this.accumulator>=this.TARGET_MS&&_steps<5){this.update(this.FIXED_DT);this.accumulator-=this.TARGET_MS;_steps++;}if(this.accumulator>this.TARGET_MS*5)this.accumulator=0;this.draw();requestAnimationFrame((t)=>this.loop(t));}
+let _steps=0;while(this.accumulator>=this.TARGET_MS&&_steps<5){this.update(this.FIXED_DT*TIME.scale);this.accumulator-=this.TARGET_MS;_steps++;}if(this.accumulator>this.TARGET_MS*5)this.accumulator=0;this.draw();requestAnimationFrame((t)=>this.loop(t));}
 start(){this.fr=0;this.ff=0;requestAnimationFrame((t)=>this.loop(t));}
 }
 
