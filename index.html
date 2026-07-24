@@ -214,6 +214,27 @@ window.GAME_LEVELS=window.GAME_LEVELS||[];
 const canvas=document.getElementById('C'),ctx=canvas.getContext('2d');
 const lightC=document.createElement('canvas'),lctx=lightC.getContext('2d');
 const bloomC=document.createElement('canvas'),bctx=bloomC.getContext('2d');
+// second (smaller) bloom buffer for a cheap dual-downsample blur — avoids the costly ctx.filter='blur()'
+const bloom2C=document.createElement('canvas'),b2ctx=bloom2C.getContext('2d');
+// pre-rendered radial "darkness cut" sprite: baked once, reused via drawImage for every light source
+// (replaces a per-light-per-frame createRadialGradient in drawLighting)
+const _lightMask=(()=>{const S=128,cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');const rg=g.createRadialGradient(S/2,S/2,S*0.04,S/2,S/2,S/2);rg.addColorStop(0,'rgba(0,0,0,1)');rg.addColorStop(0.55,'rgba(0,0,0,0.5)');rg.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=rg;g.fillRect(0,0,S,S);return cv;})();
+// ===== ADAPTIVE QUALITY MANAGER =====
+// Measures a smoothed frame time and picks a quality tier with hysteresis, so a struggling
+// device can shed the very heaviest effects to hold ~60fps, while capable hardware keeps full quality.
+const PERF={ms:16.7,tier:0,_lo:0,_hi:0,
+  // tier 0 = full quality, 1 = trim heaviest fx, 2 = performance mode
+  sample(dt){if(dt>0&&dt<200){this.ms+=(dt-this.ms)*0.08;}
+    // hysteresis counters: need sustained slow/fast frames before switching tiers.
+    // slow = >20ms (~below 50fps, i.e. a real dip worth shedding detail for); fast = <15.5ms (~64fps, headroom to restore)
+    if(this.ms>20){this._lo++;this._hi=0;}else if(this.ms<15.5){this._hi++;this._lo=0;}else{this._lo=Math.max(0,this._lo-1);this._hi=Math.max(0,this._hi-1);}
+    if(this._lo>40&&this.tier<2){this.tier++;this._lo=0;}
+    else if(this._hi>120&&this.tier>0){this.tier--;this._hi=0;}},
+  get fogLayers(){return this.tier===0?3:this.tier===1?2:1;},
+  get weatherScale(){return this.tier===0?1:this.tier===1?0.7:0.45;},
+  get glowShadows(){return this.tier===0;}, // per-particle shadowBlur only at full quality
+  get fps(){return Math.round(1000/this.ms);}};
+window.PERF=PERF;
 try{screen.orientation.lock('landscape').catch(()=>{})}catch(e){}
 function resize(){canvas.width=window.innerWidth;canvas.height=window.innerHeight}
 resize();window.addEventListener('resize',resize);
@@ -1402,8 +1423,9 @@ _layer(c,list,cam,par,W,world,body,winCol,litA,detail,t){for(const s of list){co
 draw(c,cam,world,theme,fr,vw,vh){
 if(this.theme!==theme)this.init(theme,world);
 const pal=this.pal,W=vw||canvas.width,H=vh||canvas.height,t=Date.now();this._baseY=H;
-// sky
-const g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,pal.sky[0]);g.addColorStop(.55,pal.sky[1]);g.addColorStop(1,pal.sky[2]);c.fillStyle=g;c.fillRect(0,0,W,H);
+// sky (static per biome/height — cached)
+if(!this._skyGrad||this._skyH!==H||this._skyTheme!==theme){this._skyH=H;this._skyTheme=theme;const g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,pal.sky[0]);g.addColorStop(.55,pal.sky[1]);g.addColorStop(1,pal.sky[2]);this._skyGrad=g;}
+c.fillStyle=this._skyGrad;c.fillRect(0,0,W,H);
 // horizon atmospheric glow band
 c.save();c.globalCompositeOperation='lighter';const hy=H*0.6;const hgr=c.createLinearGradient(0,hy-H*0.32,0,hy+H*0.24);hgr.addColorStop(0,pal.horizon+'0)');hgr.addColorStop(0.55,pal.horizon+(0.15+Math.sin(t/3400)*0.03).toFixed(3)+')');hgr.addColorStop(1,pal.horizon+'0)');c.fillStyle=hgr;c.fillRect(0,hy-H*0.32,W,H*0.56);c.restore();
 // FAR structures (silhouette only) + distance haze
@@ -1420,7 +1442,7 @@ c.fillStyle='rgba('+pal.haze+',0.26)';c.fillRect(0,0,W,H);
 this._layer(c,this.near,cam,0.46,W,world,pal.near,pal.win,0.42,2,t);
 // drifting fog banks
 c.save();
-for(let i=0;i<3;i++){const fy=H*0.4+i*H*0.2+Math.sin(t/3000+i*2)*20;const drift=(t/40*(0.3+i*0.2)+cam.x*0.05)%(W+400)-200;const fgd=c.createRadialGradient(drift,fy,10,drift,fy,280+i*70);fgd.addColorStop(0,pal.fog+(0.12-i*0.02).toFixed(3)+')');fgd.addColorStop(1,pal.fog+'0)');c.fillStyle=fgd;c.fillRect(0,fy-200,W,400);}
+const _bgF=(typeof PERF!=='undefined')?PERF.fogLayers:3;for(let i=0;i<_bgF;i++){const fy=H*0.4+i*H*0.2+Math.sin(t/3000+i*2)*20;const drift=(t/40*(0.3+i*0.2)+cam.x*0.05)%(W+400)-200;const fgd=c.createRadialGradient(drift,fy,10,drift,fy,280+i*70);fgd.addColorStop(0,pal.fog+(0.12-i*0.02).toFixed(3)+')');fgd.addColorStop(1,pal.fog+'0)');c.fillStyle=fgd;c.fillRect(0,fy-200,W,400);}
 c.restore();
 // floating motes / rising spores
 c.save();c.globalCompositeOperation='lighter';
@@ -1959,17 +1981,29 @@ c.save();c.globalCompositeOperation='soft-light';c.globalAlpha=0.42;c.fillStyle=
 // gentle warm/cool split: lift top toward the ray colour (static gradient — cached, only rebuilt on resize / biome change)
 if(!this._splitGrad||this._splitH!==H||this._splitRay!==pal.ray){this._splitH=H;this._splitRay=pal.ray;const sg=c.createLinearGradient(0,0,0,H);sg.addColorStop(0,pal.ray+'1)');sg.addColorStop(0.6,'rgba(0,0,0,0)');sg.addColorStop(1,'rgba(0,0,0,0.5)');this._splitGrad=sg;}
 c.save();c.globalCompositeOperation='overlay';c.globalAlpha=0.14;c.fillStyle=this._splitGrad;c.fillRect(0,0,W,H);c.restore();
-// cheap bloom: blur a downscaled copy of the frame and add it back
+// Bloom. Tier 0 keeps the original look exactly (1/4 downscale + gaussian filter blur).
+// Tier 1 swaps the costly ctx.filter='blur()' for a cheap dual-downsample (1/4 -> 1/8) whose
+// bilinear upscale supplies the blur for free. Tier 2 drops bloom entirely.
+if(PERF.tier===0){
 const bw=Math.max(2,W>>2),bh=Math.max(2,H>>2);
 if(bloomC.width!==bw||bloomC.height!==bh){bloomC.width=bw;bloomC.height=bh;}
 bctx.clearRect(0,0,bw,bh);bctx.drawImage(canvas,0,0,bw,bh);
 c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.3;c.imageSmoothingEnabled=true;c.filter='blur(3px)';c.drawImage(bloomC,0,0,W,H);c.filter='none';c.restore();
+}else if(PERF.tier===1){
+const bw=Math.max(2,W>>2),bh=Math.max(2,H>>2),bw2=Math.max(2,W>>3),bh2=Math.max(2,H>>3);
+if(bloomC.width!==bw||bloomC.height!==bh){bloomC.width=bw;bloomC.height=bh;}
+if(bloom2C.width!==bw2||bloom2C.height!==bh2){bloom2C.width=bw2;bloom2C.height=bh2;}
+bctx.imageSmoothingEnabled=true;b2ctx.imageSmoothingEnabled=true;
+bctx.clearRect(0,0,bw,bh);bctx.drawImage(canvas,0,0,bw,bh);           // frame -> 1/4
+b2ctx.clearRect(0,0,bw2,bh2);b2ctx.drawImage(bloomC,0,0,bw2,bh2);     // 1/4 -> 1/8 (second blur pass)
+c.save();c.globalCompositeOperation='lighter';c.globalAlpha=0.3;c.imageSmoothingEnabled=true;c.drawImage(bloom2C,0,0,W,H);c.restore();
+}
 const t=Date.now();
 // ---- light atmospheric haze veil: soft breathing mist layered for volumetric depth (per-biome density) ----
 {const thH=this.world.theme;const hz=thH==='crypt'?0.085:thH==='castle'?0.08:thH==='sewers'?0.05:thH==='ramparts'?0.058:0.066;
 const breathe=hz*(0.82+0.18*Math.sin(t/3400));
 c.save();c.globalCompositeOperation='screen';
-for(let i=0;i<3;i++){const yc=H*(0.30+i*0.23)+Math.sin(t/4200+i*2.1)*H*0.045;const a=(breathe*(1-i*0.17)).toFixed(3);const band=c.createLinearGradient(0,yc-H*0.30,0,yc+H*0.30);band.addColorStop(0,'rgba('+pal.haze+',0)');band.addColorStop(0.5,'rgba('+pal.haze+','+a+')');band.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=band;c.fillRect(0,yc-H*0.30,W,H*0.60);}
+const _hzN=PERF.fogLayers;for(let i=0;i<_hzN;i++){const yc=H*(0.30+i*0.23)+Math.sin(t/4200+i*2.1)*H*0.045;const a=(breathe*(1-i*0.17)).toFixed(3);const band=c.createLinearGradient(0,yc-H*0.30,0,yc+H*0.30);band.addColorStop(0,'rgba('+pal.haze+',0)');band.addColorStop(0.5,'rgba('+pal.haze+','+a+')');band.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=band;c.fillRect(0,yc-H*0.30,W,H*0.60);}
 c.restore();}
 // soft volumetric light shafts through the ruins
 c.save();c.globalCompositeOperation='lighter';
@@ -1979,7 +2013,7 @@ c.restore();
 c.save();c.globalCompositeOperation='lighter';const ab=c.createLinearGradient(0,H,0,H*0.7);ab.addColorStop(0,pal.horizon+(0.12+Math.sin(t/1700)*0.03).toFixed(3)+')');ab.addColorStop(1,pal.horizon+'0)');c.fillStyle=ab;c.fillRect(0,H*0.7,W,H*0.3);c.restore();
 // ---- drifting low fog banks for atmospheric depth ----
 c.save();c.globalCompositeOperation='screen';
-for(let i=0;i<3;i++){const drift=((t*(0.010+i*0.006))%(W+520))-260,fy=H*(0.60+i*0.13),fa=0.055-i*0.014;const bx=drift+(i%2?W*0.5:0);const rg=c.createRadialGradient(bx,fy,10,bx,fy,W*0.34);rg.addColorStop(0,'rgba('+pal.haze+','+fa.toFixed(3)+')');rg.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=rg;c.fillRect(0,fy-H*0.22,W,H*0.44);
+const _fbN=PERF.fogLayers;for(let i=0;i<_fbN;i++){const drift=((t*(0.010+i*0.006))%(W+520))-260,fy=H*(0.60+i*0.13),fa=0.055-i*0.014;const bx=drift+(i%2?W*0.5:0);const rg=c.createRadialGradient(bx,fy,10,bx,fy,W*0.34);rg.addColorStop(0,'rgba('+pal.haze+','+fa.toFixed(3)+')');rg.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=rg;c.fillRect(0,fy-H*0.22,W,H*0.44);
 const bx2=bx-W*0.6;const rg2=c.createRadialGradient(bx2,fy,10,bx2,fy,W*0.34);rg2.addColorStop(0,'rgba('+pal.haze+','+fa.toFixed(3)+')');rg2.addColorStop(1,'rgba('+pal.haze+',0)');c.fillStyle=rg2;c.fillRect(0,fy-H*0.22,W,H*0.44);}
 c.restore();
 // drifting fireflies / glowing pollen — anchored to the WORLD, not the camera
@@ -1995,10 +2029,10 @@ c.restore();}
 // ---- per-biome weather / ambient overlay: snow, sewer rain, rampart embers, crypt spirits, dungeon dust ----
 {const th=this.world.theme;const cfg=th==='castle'?{n:74,col:'#dbe8ff',sz:[1,2.6],vy:[0.3,1.0],vx:[-0.3,0.5],glow:false,mode:'flake'}:th==='sewers'?{n:80,col:'#9fc0d0',sz:[0.6,1.4],vy:[3.2,5.6],vx:[0,0.2],glow:false,mode:'rain'}:th==='ramparts'?{n:52,col:'#ff9442',sz:[1,2.4],vy:[-0.95,-0.35],vx:[-0.3,0.4],glow:true,mode:'ember'}:th==='crypt'?{n:34,col:'#b070ff',sz:[1.4,3],vy:[-0.5,-0.16],vx:[-0.25,0.25],glow:true,mode:'spirit'}:{n:38,col:'#6a6a84',sz:[0.8,1.8],vy:[0.14,0.5],vx:[-0.2,0.2],glow:false,mode:'dust'};
 if(!this._wthr||this._wthrMode!==cfg.mode){this._wthrMode=cfg.mode;this._wthr=[];for(let i=0;i<cfg.n;i++)this._wthr.push({x:Math.random()*W,y:Math.random()*H,vx:cfg.vx[0]+Math.random()*(cfg.vx[1]-cfg.vx[0]),vy:cfg.vy[0]+Math.random()*(cfg.vy[1]-cfg.vy[0]),sz:cfg.sz[0]+Math.random()*(cfg.sz[1]-cfg.sz[0]),ph:Math.random()*99});}
-c.save();if(cfg.glow){c.globalCompositeOperation='lighter';c.shadowColor=cfg.col;}c.fillStyle=cfg.col;
-for(const wp of this._wthr){wp.x+=wp.vx+(cfg.mode==='flake'?Math.sin(t/700+wp.ph)*0.4:cfg.mode==='spirit'?Math.sin(t/900+wp.ph)*0.5:0);wp.y+=wp.vy;
+const _wGlow=cfg.glow&&PERF.glowShadows;c.save();if(cfg.glow){c.globalCompositeOperation='lighter';if(_wGlow)c.shadowColor=cfg.col;}c.fillStyle=cfg.col;
+const _wN=Math.ceil(this._wthr.length*PERF.weatherScale);for(let wi=0;wi<_wN;wi++){const wp=this._wthr[wi];wp.x+=wp.vx+(cfg.mode==='flake'?Math.sin(t/700+wp.ph)*0.4:cfg.mode==='spirit'?Math.sin(t/900+wp.ph)*0.5:0);wp.y+=wp.vy;
 if(wp.y>H+6){wp.y=-6;wp.x=Math.random()*W;}else if(wp.y<-6){wp.y=H+6;wp.x=Math.random()*W;}if(wp.x>W+6)wp.x=-6;else if(wp.x<-6)wp.x=W+6;
-const a=(cfg.mode==='ember'||cfg.mode==='spirit')?(0.28+Math.sin(t/500+wp.ph)*0.24):(cfg.mode==='rain'?0.26:0.5);c.globalAlpha=Math.max(0,a);if(cfg.glow)c.shadowBlur=wp.sz*3;
+const a=(cfg.mode==='ember'||cfg.mode==='spirit')?(0.28+Math.sin(t/500+wp.ph)*0.24):(cfg.mode==='rain'?0.26:0.5);c.globalAlpha=Math.max(0,a);if(_wGlow)c.shadowBlur=wp.sz*3;
 if(cfg.mode==='rain'){c.fillRect(wp.x,wp.y,0.9,wp.sz*5);}else{c.beginPath();c.arc(wp.x,wp.y,wp.sz,0,Math.PI*2);c.fill();}}
 c.shadowBlur=0;c.restore();}
 // ---- boss arena ambiance: brooding red haze, heartbeat pulse, drifting embers ----
@@ -2009,16 +2043,23 @@ if(!this._ash){this._ash=[];for(let i=0;i<28;i++)this._ash.push({x:Math.random()
 c.save();c.globalCompositeOperation='lighter';
 for(const e of this._ash){e.y+=e.vy;e.x+=e.vx+Math.sin(t/700+e.ph)*0.3;if(e.y>H+4){e.y=-4;e.x=Math.random()*W;}const ea=0.35+Math.sin(t/420+e.ph)*0.3;c.globalAlpha=Math.max(0,ea);c.fillStyle=enr?'#ff5a2a':'#ff9442';c.shadowColor='#f60';c.shadowBlur=e.sz*3;c.beginPath();c.arc(e.x,e.y,e.sz,0,Math.PI*2);c.fill();}
 c.shadowBlur=0;c.restore();}
-// deeper cinematic vignette for framing
-const vg2=c.createRadialGradient(W/2,H*0.46,W*0.22,W/2,H*0.5,W*0.62);vg2.addColorStop(0,'rgba(0,0,0,0)');vg2.addColorStop(1,'rgba(0,0,0,0.42)');c.fillStyle=vg2;c.fillRect(0,0,W,H);
+// deeper cinematic vignette for framing (static — cached, rebuilt only on resize)
+if(!this._vg2||this._vg2W!==W||this._vg2H!==H){this._vg2W=W;this._vg2H=H;const vg2=c.createRadialGradient(W/2,H*0.46,W*0.22,W/2,H*0.5,W*0.62);vg2.addColorStop(0,'rgba(0,0,0,0)');vg2.addColorStop(1,'rgba(0,0,0,0.42)');this._vg2=vg2;}
+c.fillStyle=this._vg2;c.fillRect(0,0,W,H);
 }
 drawLighting(c,cam,zoom){
 if(lightC.width!==canvas.width||lightC.height!==canvas.height){lightC.width=canvas.width;lightC.height=canvas.height;}
 const dark={dungeon:0.45,sewers:0.5,ramparts:0.38,castle:0.42,crypt:0.55}[this.world.theme]||0.45;
-lctx.globalCompositeOperation='source-over';lctx.clearRect(0,0,lightC.width,lightC.height);
+lctx.globalCompositeOperation='source-over';lctx.globalAlpha=1;lctx.clearRect(0,0,lightC.width,lightC.height);
 lctx.fillStyle=`rgba(3,5,12,${dark})`;lctx.fillRect(0,0,lightC.width,lightC.height);
-lctx.globalCompositeOperation='destination-out';
-const cut=(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom,sy=(wy-cam.y)*zoom,sr=r*zoom;if(sx<-sr||sx>lightC.width+sr||sy<-sr||sy>lightC.height+sr)return;const g=lctx.createRadialGradient(sx,sy,sr*0.08,sx,sy,sr);g.addColorStop(0,`rgba(0,0,0,${a})`);g.addColorStop(0.55,`rgba(0,0,0,${a*0.5})`);g.addColorStop(1,'rgba(0,0,0,0)');lctx.fillStyle=g;lctx.beginPath();lctx.arc(sx,sy,sr,0,Math.PI*2);lctx.fill();};
+lctx.globalCompositeOperation='destination-out';lctx.imageSmoothingEnabled=false;
+// Full quality (tier 0): per-light radial gradient — pixel-perfect, matches the original look.
+// Performance mode (tier>=1): reuse one baked radial mask via drawImage (a cheap texture blit,
+// no gradient allocation) to shed cost when the device is struggling.
+const _fast=PERF.tier>0;
+const cut=_fast
+  ?(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom,sy=(wy-cam.y)*zoom,sr=r*zoom;if(sx<-sr||sx>lightC.width+sr||sy<-sr||sy>lightC.height+sr)return;lctx.globalAlpha=a;lctx.drawImage(_lightMask,sx-sr,sy-sr,sr*2,sr*2);}
+  :(wx,wy,r,a)=>{const sx=(wx-cam.x)*zoom,sy=(wy-cam.y)*zoom,sr=r*zoom;if(sx<-sr||sx>lightC.width+sr||sy<-sr||sy>lightC.height+sr)return;lctx.globalAlpha=1;const g=lctx.createRadialGradient(sx,sy,sr*0.08,sx,sy,sr);g.addColorStop(0,`rgba(0,0,0,${a})`);g.addColorStop(0.55,`rgba(0,0,0,${a*0.5})`);g.addColorStop(1,'rgba(0,0,0,0)');lctx.fillStyle=g;lctx.beginPath();lctx.arc(sx,sy,sr,0,Math.PI*2);lctx.fill();};
 const t=Date.now(),p=this.player;
 cut(p.x+p.w/2,p.y+p.h*0.4,150,1);
 for(const d of this.decos){if(d.type==='torch')cut(d.x+16,d.y-18,120+Math.sin(t/90+d.x)*9,0.95);else if(d.type==='lantern')cut(d.x+16,d.y-12,110,0.9);else if(d.type==='brazier')cut(d.x+16,d.y-6,120+Math.sin(t/80+d.x)*10,0.95);else if(d.type==='candle')cut(d.x+16,d.y-4,52,0.7);else if(d.type==='crystal')cut(d.x+16,d.y+2,80,0.7);else if(d.type==='mushroom')cut(d.x+14,d.y+6,55,0.6);}
@@ -2029,6 +2070,7 @@ for(const en of this.enemies){if(!en.alive)continue;if(en.wisp)cut(en.x+7,en.y+7
 for(const it of this.items)if(it.type==='cell')cut(it.x+6,it.y+6,34,0.55);
 for(const ch of this.chests)if(ch.cursed&&!ch.opened)cut(ch.x+13,ch.y+8,60,0.6);
 for(const sw of this.shockwaves)cut(sw.x,sw.y-6,50,0.85);
+lctx.globalAlpha=1;lctx.globalCompositeOperation='source-over';
 c.drawImage(lightC,0,0);
 }
 
@@ -2202,8 +2244,9 @@ for(const ar of this.arrows)ar.draw(c,cam);for(const o of this.orbs)o.draw(c,cam
 for(const pl of this.pools){const px2=pl.x-cam.x,py2=pl.y-cam.y;if(px2>-50&&px2<canvas.width+50){const a=Math.min(1,pl.life/60);c.save();c.globalAlpha=a*0.85;c.fillStyle='#4a8a20';c.beginPath();c.ellipse(px2+pl.w/2,py2+4,pl.w/2,4,0,0,Math.PI*2);c.fill();c.fillStyle='#7fd030';c.beginPath();c.ellipse(px2+pl.w/2,py2+3,pl.w/2-3,2.5,0,0,Math.PI*2);c.fill();c.globalCompositeOperation='lighter';c.fillStyle='rgba(160,255,80,0.25)';c.beginPath();c.ellipse(px2+pl.w/2,py2+2,pl.w/2,5,0,0,Math.PI*2);c.fill();c.restore();}}
 for(const v of this.vents)v.draw(c,cam);
 for(const b of this.bombs)b.draw(c,cam);this.particles.draw(c,cam);for(const f of this.ft)f.draw(c,cam);c.restore();this.drawLighting(c,cam,zoom);this.drawPost(c);this.drawHUD(c);
-const vg=c.createRadialGradient(canvas.width/2,canvas.height/2,canvas.width*.3,canvas.width/2,canvas.height/2,canvas.width*.66);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.22)');c.fillStyle=vg;c.fillRect(0,0,canvas.width,canvas.height);
-if(BG.pal){c.save();c.globalCompositeOperation='lighter';const gr2=c.createLinearGradient(0,0,0,canvas.height*0.5);gr2.addColorStop(0,BG.pal.ray+'0.06)');gr2.addColorStop(1,BG.pal.ray+'0)');c.fillStyle=gr2;c.fillRect(0,0,canvas.width,canvas.height*0.5);c.restore();}
+if(!this._vgA||this._vgAW!==canvas.width||this._vgAH!==canvas.height){this._vgAW=canvas.width;this._vgAH=canvas.height;const vg=c.createRadialGradient(canvas.width/2,canvas.height/2,canvas.width*.3,canvas.width/2,canvas.height/2,canvas.width*.66);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.22)');this._vgA=vg;}
+c.fillStyle=this._vgA;c.fillRect(0,0,canvas.width,canvas.height);
+if(BG.pal){if(!this._gr2||this._gr2H!==canvas.height||this._gr2Ray!==BG.pal.ray){this._gr2H=canvas.height;this._gr2Ray=BG.pal.ray;const gr2=c.createLinearGradient(0,0,0,canvas.height*0.5);gr2.addColorStop(0,BG.pal.ray+'0.06)');gr2.addColorStop(1,BG.pal.ray+'0)');this._gr2=gr2;}c.save();c.globalCompositeOperation='lighter';c.fillStyle=this._gr2;c.fillRect(0,0,canvas.width,canvas.height*0.5);c.restore();}
 if(this.player.hp<this.player.mhp*.3){c.fillStyle=`rgba(255,0,0,${(1-this.player.hp/(this.player.mhp*.3))*.12*(Math.sin(Date.now()/300)*.5+.5)})`;c.fillRect(0,0,canvas.width,canvas.height);}
 if(this.dmgFlash>0){const a=this.dmgFlash/10*0.28;const eg=c.createRadialGradient(canvas.width/2,canvas.height/2,canvas.width*.25,canvas.width/2,canvas.height/2,canvas.width*.62);eg.addColorStop(0,'rgba(255,0,0,0)');eg.addColorStop(1,`rgba(255,10,10,${a})`);c.fillStyle=eg;c.fillRect(0,0,canvas.width,canvas.height);}
 if(this.fadeT>0){c.fillStyle=`rgba(0,0,0,${Math.min(1,this.fadeT/36)})`;c.fillRect(0,0,canvas.width,canvas.height);}}
@@ -2425,7 +2468,9 @@ if(this._mmExp!==exp.size||this._mmLvl!==this.actualLvl){this._mmExp=exp.size;th
 c.drawImage(this._mm,mx,my);
 c.strokeStyle='rgba(255,255,255,.35)';c.lineWidth=1;c.strokeRect(mx+this.cam.x*scX,my+this.cam.y*scY,(this.vw||canvas.width)*scX,(this.vh||canvas.height)*scY);c.fillStyle='#f44';for(const en of this.enemies)if(en.alive&&exp.has((Math.floor(en.x/32)>>2)+','+(Math.floor(en.y/32)>>2))){c.fillRect(mx+en.x*scX-1,my+en.y*scY-1,2.5,2.5);}const pl=0.6+Math.sin(Date.now()/250)*0.4;c.fillStyle='#a060ff';c.globalAlpha=pl;c.fillRect(mx+this.portalPos.x*scX-1.5,my+this.portalPos.y*scY-1.5,4,4);c.globalAlpha=1;c.fillStyle='#0fa';c.shadowColor='#0fa';c.shadowBlur=5;c.fillRect(mx+this.player.x*scX-1.5,my+this.player.y*scY-1.5,4,4);c.shadowBlur=0;c.restore();c.restore();}
 
-loop(timestamp){if(!this.lastTime)this.lastTime=timestamp;const elapsed=Math.min(timestamp-this.lastTime,100);this.lastTime=timestamp;this.accumulator+=elapsed;this.pollGamepad();while(this.accumulator>=this.TARGET_MS){this.update(this.FIXED_DT);this.accumulator-=this.TARGET_MS;}this.draw();requestAnimationFrame((t)=>this.loop(t));}
+loop(timestamp){if(!this.lastTime)this.lastTime=timestamp;const elapsed=Math.min(timestamp-this.lastTime,100);this.lastTime=timestamp;PERF.sample(elapsed);this.accumulator+=elapsed;this.pollGamepad();
+// clamp the physics catch-up so a hitch can never spiral into a long blocking loop of updates
+let _steps=0;while(this.accumulator>=this.TARGET_MS&&_steps<5){this.update(this.FIXED_DT);this.accumulator-=this.TARGET_MS;_steps++;}if(this.accumulator>this.TARGET_MS*5)this.accumulator=0;this.draw();requestAnimationFrame((t)=>this.loop(t));}
 start(){this.fr=0;this.ff=0;requestAnimationFrame((t)=>this.loop(t));}
 }
 
