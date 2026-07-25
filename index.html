@@ -487,7 +487,13 @@ die(){
   this.noise2(0.50,0.18,{filter:'lowpass',ff:1600,ffEnd:180,rough:0.35});
   for(let i=0;i<4;i++)this.later(130+i*95+Math.random()*55,()=>this.noise2(0.05,0.07,{filter:'bandpass',ff:900+Math.random()*900,fq:3,rough:0.2}));
 },
-footstep(){this.noise2(0.05,0.055,{filter:'lowpass',ff:620,ffEnd:220,rough:0.4});this.env(100,62,0.045,'sine',0.045,{atk:0.001});},
+// Weight scales with how fast you are actually moving, and the two feet are given a small, stable
+// difference in tone. Identical repeats are the giveaway that a run is one sample on a loop; a
+// consistent left/right alternation is what real footfall sounds like.
+footstep(v){const n=+v;const s=!(n>0)?0.55:n>1?1:n;
+  this._fsL=!this._fsL;const tilt=this._fsL?1:0.87;
+  this.noise2(0.05,(0.030+s*0.038),{filter:'lowpass',ff:(600+Math.random()*80)*tilt,ffEnd:220,rough:0.4});
+  this.env(102*tilt,62*tilt,0.045,'sine',(0.026+s*0.030),{atk:0.001});},
 // ---- FLASK ----
 // Glass tick, then three glugs whose resonance FALLS as the bottle empties. That falling pitch is
 // the whole tell that something is being drunk; the old ascending beeps read as a power-up jingle.
@@ -2001,7 +2007,7 @@ setGameSpeed(val){TIME.set(val/100);document.getElementById('SpeedVal').textCont
 loadPerm(){const d=SaveSystem.getPerm();return{runs:d.runs||0,bonusHp:d.bonusHp||0,bonusDmg:d.bonusDmg||0,totalKills:d.totalKills||0};}
 savePerm(){SaveSystem.setPerm(this.permUpgrades);}
 
-mkP(){const perm=this.permUpgrades||{bonusHp:0,bonusDmg:0};return{x:150,y:400,w:20,h:36,vx:0,vy:0,speed:3.5,jf:-11.9,mhp:100+perm.bonusHp,hp:100+perm.bonusHp,facing:1,gr:false,jmp:false,jbt:0,cyt:0,dj:true,hdj:true,atk:false,at:0,ad:15,acd:0,inv:0,def:0,rl:false,rlt:0,rld:20,rlcd:0,rls:8,cw:0,wallSliding:false,maxFallSpeed:0,weapons:[{name:'Rusty Sword',type:'sword',damage:15+perm.bonusDmg,range:42,speed:14},{name:'Short Bow',type:'bow',damage:8,range:300,speed:28}],scd:0,smc:150,cells:0,gold:0,level:1,exp:0,etl:50,_wg:false,shield:0,shieldMax:0,shieldTimer:0,dodgeChance:0,hasParry:false,hasStrikeBlock:false,vampLvl:0,vampChance:0,pullOnHit:false,arrowPierce:false,rollDamageTrail:false,hasGroundPound:false,hist:[],brutality:0,tactics:0,survival:0,sqx:1,sqy:1,flasks:2,flaskMax:2,curse:0,comboStep:0,comboT:0,slam:false,atkBuf:0,rlBuf:0,hasAirRoll:false,thorns:0,adrenaline:false,magnetR:80,rally:0,rallyT:0,hpDisplay:100+perm.bonusHp,wjMax:1,wjLeft:1,wjSpin:0,hang:false,hangCd:0,climb:false,climbCd:0,slowT:0,bowFired:true,didHit:false,sneak:false,dropT:0};}
+mkP(){const perm=this.permUpgrades||{bonusHp:0,bonusDmg:0};return{x:150,y:400,w:20,h:36,vx:0,vy:0,speed:3.5,jf:-11.9,mhp:100+perm.bonusHp,hp:100+perm.bonusHp,facing:1,gr:false,jmp:false,jbt:0,cyt:0,dj:true,hdj:true,atk:false,at:0,ad:15,acd:0,inv:0,def:0,rl:false,rlt:0,rld:20,rlcd:0,rls:8,cw:0,wallSliding:false,maxFallSpeed:0,weapons:[{name:'Rusty Sword',type:'sword',damage:15+perm.bonusDmg,range:42,speed:14},{name:'Short Bow',type:'bow',damage:8,range:300,speed:28}],scd:0,smc:150,cells:0,gold:0,level:1,exp:0,etl:50,_wg:false,shield:0,shieldMax:0,shieldTimer:0,dodgeChance:0,hasParry:false,hasStrikeBlock:false,vampLvl:0,vampChance:0,pullOnHit:false,arrowPierce:false,rollDamageTrail:false,hasGroundPound:false,hist:[],brutality:0,tactics:0,survival:0,sqx:1,sqy:1,gait:0,flasks:2,flaskMax:2,curse:0,comboStep:0,comboT:0,slam:false,atkBuf:0,rlBuf:0,hasAirRoll:false,thorns:0,adrenaline:false,magnetR:80,rally:0,rallyT:0,hpDisplay:100+perm.bonusHp,wjMax:1,wjLeft:1,wjSpin:0,hang:false,hangCd:0,climb:false,climbCd:0,slowT:0,bowFired:true,didHit:false,sneak:false,dropT:0};}
 
 async load(){for(let i=0;i<=100;i+=U.ri(5,15)){document.getElementById('LB').style.width=Math.min(i,100)+'%';await new Promise(r=>setTimeout(r,60));}document.getElementById('LB').style.width='100%';document.getElementById('TS').style.display='block';const s=()=>{document.getElementById('LS').classList.add('h');SFX.init();SFX.resume();this.showMainMenu();document.removeEventListener('click',s);document.removeEventListener('touchstart',s);};document.addEventListener('click',s);document.addEventListener('touchstart',s);}
 
@@ -2512,7 +2518,7 @@ if(p.comboT>0)p.comboT-=s;
 if(p.rallyT>0){p.rallyT-=s;if(p.rallyT<=0)p.rally=0;}
 if(p.hpDisplay===undefined)p.hpDisplay=p.hp;if(p.hpDisplay<p.hp)p.hpDisplay=p.hp;else p.hpDisplay=U.lerp(p.hpDisplay,p.hp,0.06*s);
 if(inp.isFlask()){if(!this._fl){this._fl=true;this.useFlask();}}else this._fl=false;
-if(p.gr&&Math.abs(p.vx)>1&&this.fr%14===0)SFX.footstep();
+// (footsteps are driven by the gait phase below, after movement has been resolved)
 // Aerial slam: hold down + attack in the air
 if(!p.gr&&!p.slam&&inp.isDown()&&inp.isAttack()&&p.acd<=0&&p.vy>-3){p.slam=true;p.vy=Math.max(p.vy,14);p.vx*=0.3;p.acd=10;SFX.dodge();}
 if(p.slam&&!p.gr)this.particles.emit(p.x+p.w/2,p.y+p.h,2,{color:'#fc6',size:3,life:12,glow:true,gravity:0,vxMin:-1,vxMax:1,vyMin:-2,vyMax:-0.5});
@@ -2567,7 +2573,40 @@ if(!p.gr&&p.vy>0){const wt=this.world.getTilesAround(p.x+p.facing*2,p.y,p.w,p.h)
 // Moss: emit green dust, fall faster
 if(this.fr%6===0)this.particles.emit(p.facing===1?p.x+p.w:p.x,p.y+p.h*0.5,1,{color:'#4a8',size:2,life:10,gravity:0.05,vxMin:p.facing*-1,vxMax:0,vyMin:0,vyMax:0.5});
 }}
+const _gx0=p.x;
 this.applyPP(s);
+// ===== GAIT =====
+// One phase drives both the leg animation and the footstep sound, and it advances with DISTANCE
+// TRAVELLED rather than with elapsed time. That is how walking actually works — you take a step
+// every stride length — so cadence follows speed for free: creeping ticks slowly, sprinting ticks
+// fast, and a footstep can never drift out of phase with the legs because there is only one phase.
+//
+// Before, the legs ran off Date.now()/70 and the sound off a fixed `fr % 14` counter. Neither knew
+// how fast the player was actually moving, and because one is wall-clock and the other is engine
+// frames they slid against each other continuously — which is why the audio read as faster than
+// the visible stride.
+//
+// Distance is measured from the ACTUAL displacement after collision resolution, not from velocity,
+// so walking into a wall produces no steps: you are not travelling, so you are not striding.
+{const moved=Math.abs(p.x-_gx0);
+ if(p.gr&&!p.rl&&!p.climb&&!p.hang){
+  const prev=p.gait||0;
+  // One unit of phase per step. 40px is a long stride for a 36px-tall figure by design: it puts a
+  // full sprint at ~3.5 steps/s, a firm jog rather than a scurry, which suits the slower pacing.
+  // Crouching shortens it, so sneaking reads as short careful shuffles.
+  p.gait=prev+moved/(p.sneak?30:40);
+  // The foot plants at maximum leg separation, which is where the leg sine is at its extreme —
+  // i.e. at each half-integer of the phase. Crossing one of those is the contact frame.
+  if(Math.floor(p.gait+0.5)!==Math.floor(prev+0.5)){
+    const spd=Math.min(1,moved/(0.7*(TIME.scale||1)));  // heavier tread the faster you are going
+    SFX.footstep(p.sneak?spd*0.35:spd);
+    this.particles.emit(p.x+p.w/2-p.facing*4,p.y+p.h-1,p.sneak?1:2,{color:'#a89878',size:2.2,life:12,gravity:0.05,friction:0.9,vxMin:-p.facing*1.6,vxMax:-p.facing*0.2,vyMin:-0.9,vyMax:0.1});
+  }
+ }else if(!p.gr){
+  // Airborne: ease the phase to the nearest neutral (legs together) so landing never snaps the
+  // legs out of a mid-stride pose.
+  const tgt=Math.round(p.gait||0);p.gait=U.app(p.gait||0,tgt,0.12,s);
+ }}
 // ---- LEDGE GRAB detection (forgiving: catches slow walk-offs and apex reaches) ----
 if(!p.gr&&!p.rl&&!p.climb&&!p.hang&&p.hangCd<=0&&p.vy>-1&&Math.abs(mx)>0.05){
 const dir2=mx>0?1:-1;
@@ -3251,7 +3290,10 @@ c.save();c.globalCompositeOperation='lighter';c.fillStyle=hc;c.shadowColor=hc;c.
 c.restore();c.restore();
 return;}
 // ---- roll afterimages (fallback) ----
-const moving=Math.abs(p.vx)>0.4&&p.gr;const rc=Math.sin(t/70);const flick=0.8+Math.sin(t/80)*0.2;
+// The legs read the same gait phase the footstep sound does, so the two are locked by construction
+// rather than by two independent timers that happen to run at similar rates. Extremes of `rc` are
+// maximum leg separation, which is exactly where a foot plants and where the step fires.
+const moving=Math.abs(p.vx)>0.4&&p.gr;const rc=Math.sin((p.gait||0)*Math.PI);const flick=0.8+Math.sin(t/80)*0.2;
 c.save();c.translate(x+w/2,y+h/2);if(d===-1)c.scale(-1,1);
 if(p.sqx&&(Math.abs(p.sqx-1)>0.01||Math.abs(p.sqy-1)>0.01)){c.translate(0,(h/2)*(1-p.sqy));c.scale(p.sqx,p.sqy);}
 // ---- COMBO BODY MOTION: the torso leads the blade, so each beat has its own posture ----
@@ -3273,7 +3315,9 @@ if(p.wjSpin>0&&!p.rl){c.rotate((1-p.wjSpin/16)*Math.PI*2*p.facing);}
 if(p.wallSliding)c.scale(0.86,1.08);
 if(p.hang){c.rotate(-0.12*p.facing);c.scale(1,1.06);}
 if(p.sneak){c.translate(0,h*0.16);c.scale(1.12,0.68);c.globalAlpha*=0.9;}
-const bob=p.gr?(moving?Math.abs(Math.sin(t/70))*1.4:(p.sneak?Math.sin(t/500)*0.4:Math.sin(t/380))):0;
+// The body sits LOWEST at contact (legs apart, knee absorbing) and rises at mid-stride, so the bob
+// tracks |rc| — the same phase again, which means the body dips exactly on the footstep.
+const bob=p.gr?(moving?Math.abs(rc)*1.4:(p.sneak?Math.sin(t/500)*0.4:Math.sin(t/380))):0;
 // ---- CAPE ----
 // The cape is driven by the character's own motion, not just a sine: horizontal velocity pushes the
 // hem backward and vertical velocity lifts it, with the sine only supplying idle drift. Cloth that
