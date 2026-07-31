@@ -1519,8 +1519,8 @@ c.globalAlpha=1;}
 // ---- lichen colonies: clustered, not evenly sprinkled ----
 if(mossN>0.55){const lc=this.theme==='crypt'?'rgba(150,95,235,':this.theme==='ramparts'?'rgba(160,180,70,':this.theme==='castle'?'rgba(80,200,170,':'rgba(85,175,105,';
 const strength=U.clamp((mossN-0.55)*2.4,0,1);
-for(let k=0;k<7;k++){const mvx=px+2+NZ.h2(tx,ty,k*7+5)*(ts-4),mvy=py+2+NZ.h2(tx,ty,k*7+6)*(ts-4);
-const local=NZ.v2(mvx*0.05,mvy*0.05,53);if(local<0.45)continue;
+for(let k=0;k<7;k++){const wmvx=tx*ts+2+NZ.h2(tx,ty,k*7+5)*(ts-4),wmvy=ty*ts+2+NZ.h2(tx,ty,k*7+6)*(ts-4),mvx=wmvx-cam.x,mvy=wmvy-cam.y;
+const local=NZ.v2(wmvx*0.05,wmvy*0.05,53);if(local<0.45)continue;
 c.fillStyle=lc+(0.10+strength*0.16).toFixed(2)+')';c.beginPath();c.arc(mvx,mvy,1.4+strength*2.2,0,Math.PI*2);c.fill();}}
 // ---- ambient occlusion in the tile's own corners, so blocks read as separate masses ----
 c.fillStyle='rgba(0,0,0,0.18)';c.fillRect(px,py+ts-8,ts,8);
@@ -1543,11 +1543,11 @@ if(!ab&&mossN>0.40){const mg=this.theme==='ramparts'?['#3e5018','#5f7f26','#8fb8
 const dens=U.clamp((mossN-0.40)*2.6,0,1);
 // silhouette layer: an irregular skirt whose depth follows the noise, drooping over the edge
 c.fillStyle=mg[0];c.beginPath();c.moveTo(px,py+1);
-for(let i=0;i<=8;i++){const mx2=px+i*(ts/8);const dp=1+NZ.v2(mx2*0.09,ty*0.6,53)*8*dens;c.lineTo(mx2,py+dp);}
+for(let i=0;i<=8;i++){const wmx2=tx*ts+i*(ts/8),mx2=wmx2-cam.x;const dp=1+NZ.v2(wmx2*0.09,ty*0.6,53)*8*dens;c.lineTo(mx2,py+dp);}
 c.lineTo(px+ts,py+1);c.lineTo(px+ts,py-1-3*dens);c.lineTo(px,py-1-3*dens);c.closePath();c.fill();
 // midtone clumps
-c.fillStyle=mg[1];for(let i=0;i<5;i++){const dxm=px+2+NZ.h2(tx,ty,i+13)*(ts-4);
- const l=NZ.v2(dxm*0.07,ty*0.5,53);if(l<0.42)continue;
+c.fillStyle=mg[1];for(let i=0;i<5;i++){const wdxm=tx*ts+2+NZ.h2(tx,ty,i+13)*(ts-4),dxm=wdxm-cam.x;
+ const l=NZ.v2(wdxm*0.07,ty*0.5,53);if(l<0.42)continue;
  c.beginPath();c.ellipse(dxm,py+1+l*3,2.6+l*2,1.6+l*1.4,0,0,Math.PI*2);c.fill();}
 // rim-lit tips catching the ambient from above — this is what makes the moss read as volume
 c.fillStyle=mg[2];for(let i=0;i<4;i++){const dxm=px+3+NZ.h2(tx,ty,i+27)*(ts-6),dl=2+NZ.h2(tx,ty,i+31)*4*dens;
@@ -2649,7 +2649,7 @@ if(topOpen){
  const cnt=2+Math.round(dens*5);
  // pass 1 — dark silhouette mass hugging the stone, the "shadow root" of the clump
  c.fillStyle=veg[0];c.beginPath();c.moveTo(px,py+1);
- for(let i=0;i<=6;i++){const gx=px+i*(ts/6);c.lineTo(gx,py-1-NZ.v2(gx*0.14,ty,53)*5*dens);}
+ for(let i=0;i<=6;i++){const wgx=tx*ts+i*(ts/6),gx=wgx-cam.x;c.lineTo(gx,py-1-NZ.v2(wgx*0.14,ty,53)*5*dens);}
  c.lineTo(px+ts,py+1);c.closePath();c.fill();
  // pass 2 — blades. Each is a tapered wedge, not a stroke, so it has a thick base and a fine tip,
  // and each sways on its own phase so the clump breathes instead of waving as one rigid unit.
@@ -2679,9 +2679,9 @@ if((tt===2||botOpen)&&maxHang>6){
  const voy=(tt===2?py+7:py+ts-2);
  const strands=1+Math.round(dens*2.4);
  for(let sI=0;sI<strands;sI++){
-  const vx=px+3+rnd(sI*5+40)*(ts-6);
+  const wvx=tx*ts+3+rnd(sI*5+40)*(ts-6),vx=wvx-cam.x;
   // stems hang longer where the field is rich, and each has its own species pulled from the field
-  const species=Math.floor(NZ.v2(vx*0.05,ty*0.3,91)*4);
+  const species=Math.floor(NZ.v2(wvx*0.05,ty*0.3,91)*4);
   const len=Math.min(maxHang,(9+rnd(sI*5+41)*20)*(0.5+dens*0.9));
   const sway=Math.sin(t/760+tx*0.5+sI*2.1)*(2.4+dens*3.2);
   // dark stem first, so the leaves that follow read as sitting in front of it
