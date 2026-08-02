@@ -894,7 +894,7 @@ this.drawTimer=0;this.maxDraw=60;this.isDrawing=false;
 this.windupTimer=0;this.isWindingUp=false;this.hasAttacked=false;
 this.elitePhase='idle';this.eliteDashTimer=0;this.eliteDashDir=0;this.eliteAttackCooldown=0;
 const cycle=Math.floor(lvl/1);
-const scaleFactor=Math.pow(1.35,cycle);
+const scaleFactor=1+Math.max(0,cycle)*0.18;
 switch(type){
 case'zombie':this.w=20;this.h=32;this.mhp=Math.ceil((25+lvl*10)*scaleFactor);this.spd=Math.min(.7+lvl*.1,3)*Math.pow(1.05,cycle);this.dmg=Math.ceil((8+lvl*3)*scaleFactor);this.exp=Math.ceil(5*scaleFactor);this.hasLunge=lvl>=1;break;
 case'bat':this.w=18;this.h=14;this.mhp=Math.ceil((12+lvl*6)*scaleFactor);this.spd=Math.min(1.8+lvl*.2,4)*Math.pow(1.05,cycle);this.dmg=Math.ceil((5+lvl*2)*scaleFactor);this.exp=Math.ceil(3*scaleFactor);this.flying=true;this.diveTimer=0;this.isDiving=false;break;
@@ -1410,10 +1410,11 @@ c.restore();
 }
 }
 
+const GAME_KEYS=new Set(['ArrowLeft','ArrowRight','ArrowDown','ArrowUp','KeyA','KeyD','KeyS','KeyW','Space','KeyJ','KeyZ','KeyK','KeyX','KeyL','KeyC','KeyQ','Tab','KeyF','KeyH','ShiftLeft','ShiftRight']);
 class Input{
 constructor(){this.keys={};this.touches={};this.btns={left:false,right:false,down:false,jump:false,attack:false,roll:false,skill:false,swap:false,flask:false,sneak:false};this.gp={left:false,right:false,down:false,jump:false,attack:false,roll:false,skill:false,swap:false,flask:false,sneak:false};
-window.addEventListener('keydown',e=>{this.keys[e.code]=true;e.preventDefault();});
-window.addEventListener('keyup',e=>{this.keys[e.code]=false;e.preventDefault();});
+window.addEventListener('keydown',e=>{this.keys[e.code]=true;const tag=e.target&&e.target.tagName,editable=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(e.target&&e.target.isContentEditable);if(!editable&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&GAME_KEYS.has(e.code))e.preventDefault();});
+window.addEventListener('keyup',e=>{this.keys[e.code]=false;const tag=e.target&&e.target.tagName,editable=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(e.target&&e.target.isContentEditable);if(!editable&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&GAME_KEYS.has(e.code))e.preventDefault();});
 canvas.addEventListener('touchstart',e=>this.ts(e),{passive:false});
 canvas.addEventListener('touchmove',e=>this.tm(e),{passive:false});
 canvas.addEventListener('touchend',e=>this.te(e),{passive:false});
@@ -1809,7 +1810,21 @@ c.restore();
 },
 };
 
-const SaveSystem={MAX_SLOTS:5,getSaves(){try{return JSON.parse(localStorage.getItem('dp_saves')||'{}');}catch(e){return{};}},setSaves(s){try{localStorage.setItem('dp_saves',JSON.stringify(s));}catch(e){}},getPerm(){try{return JSON.parse(localStorage.getItem('dp_perm')||'{}');}catch(e){return{};}},setPerm(p){try{localStorage.setItem('dp_perm',JSON.stringify(p));}catch(e){}},save(slot,data){const s=this.getSaves();s[slot]=data;s[slot].timestamp=Date.now();this.setSaves(s);},load(slot){const s=this.getSaves();return s[slot]||null;},del(slot){const s=this.getSaves();delete s[slot];this.setSaves(s);},getSlotList(){const s=this.getSaves();const list=[];for(let i=1;i<=this.MAX_SLOTS;i++){list.push({slot:i,data:s[i]||null});}return list;}};
+const SAVE_VERSION=1;
+const SaveSystem={
+MAX_SLOTS:5,
+_read(key){try{const raw=localStorage.getItem(key);if(!raw)return{};const parsed=JSON.parse(raw);return parsed&&typeof parsed==='object'?parsed:{};}catch(e){console.warn(`[SaveSystem] Failed to read ${key}`,e);return{};}},
+_write(key,value){try{localStorage.setItem(key,JSON.stringify(value));return true;}catch(e){console.error(`[SaveSystem] Failed to write ${key}`,e);return false;}},
+getSaves(){return this._read('dp_saves');},
+setSaves(s){return this._write('dp_saves',s);},
+getPerm(){return this._read('dp_perm');},
+setPerm(p){return this._write('dp_perm',p);},
+normalize(data){if(!data||typeof data!=='object')return null;const defaults={hp:0,dmg:0,spd:0,bow:0,dodge:0,vamp:0};return{...data,version:SAVE_VERSION,boughtOnce:data.boughtOnce&&typeof data.boughtOnce==='object'?data.boughtOnce:{},ups:{...defaults,...(data.ups&&typeof data.ups==='object'?data.ups:{})},playerData:data.playerData&&typeof data.playerData==='object'?data.playerData:{}};},
+save(slot,data){const s=this.getSaves(),normalized=this.normalize({...data,timestamp:Date.now()});if(!normalized)return false;s[slot]=normalized;return this.setSaves(s);},
+load(slot){const s=this.getSaves(),normalized=this.normalize(s[slot]);if(normalized&&s[slot]&&s[slot].version!==SAVE_VERSION){s[slot]=normalized;this.setSaves(s);}return normalized;},
+del(slot){const s=this.getSaves();delete s[slot];return this.setSaves(s);},
+getSlotList(){const s=this.getSaves();const list=[];for(let i=1;i<=this.MAX_SLOTS;i++){list.push({slot:i,data:this.normalize(s[i])});}return list;}
+};
 
 class Game{
 constructor(){
@@ -1865,15 +1880,15 @@ showMainMenu(){this.state='menu';SFX.stopAmbient();SFX.startMusic();document.get
 menuNewGame(){document.getElementById('MainMenu').classList.remove('active');this.saveMenuMode='new';this.showSaveMenu();}
 menuLoadGame(){document.getElementById('MainMenu').classList.remove('active');this.saveMenuMode='load';this.showSaveMenu();}
 
-showSaveMenu(){const el=document.getElementById('SaveMenu');el.classList.add('active');const sub=document.getElementById('SaveMenuSub');sub.textContent=this.saveMenuMode==='new'?'Choose a slot for new game':'Select a save to load';const slots=SaveSystem.getSlotList();let h='';slots.forEach(s=>{if(s.data){const d=new Date(s.data.timestamp);const ts=d.toLocaleDateString()+' '+d.toLocaleTimeString();h+=`<div class="save-slot" onclick="G.selectSlot(${s.slot})"><div class="sl-name">Slot ${s.slot} — Lv${s.data.playerLevel||1}</div><div class="sl-info">Gold: ${s.data.gold||0} | Kills: ${s.data.kills||0} | Level: ${s.data.actualLvl||0}<br>${ts}</div><div class="sl-actions"><div class="sl-btn" onclick="event.stopPropagation();G.selectSlot(${s.slot})">${this.saveMenuMode==='load'?'LOAD':'OVERWRITE'}</div><div class="sl-btn del" onclick="event.stopPropagation();G.deleteSlot(${s.slot})">DELETE</div></div></div>`;}else{h+=`<div class="save-slot empty" onclick="G.selectSlot(${s.slot})"><div class="sl-name">Slot ${s.slot} — Empty</div><div class="sl-info">${this.saveMenuMode==='new'?'Click to start new game here':'No save data'}</div></div>`;}});document.getElementById('SaveSlots').innerHTML=h;}
+showSaveMenu(){const el=document.getElementById('SaveMenu');el.classList.add('active');const sub=document.getElementById('SaveMenuSub');sub.textContent=this.saveMenuMode==='new'?'Choose a slot for new game':'Select a save to load';const slots=SaveSystem.getSlotList();let h='';slots.forEach(s=>{if(s.data){const d=new Date(s.data.timestamp);const ts=d.toLocaleDateString()+' '+d.toLocaleTimeString();h+=`<div class="save-slot" onclick="G.selectSlot(${s.slot})"><div class="sl-name">Slot ${s.slot} — Lv${s.data.playerLevel||1}</div><div class="sl-info">Gold: ${s.data.gold??0} | Kills: ${s.data.kills??0} | Level: ${s.data.actualLvl??0}<br>${ts}</div><div class="sl-actions"><div class="sl-btn" onclick="event.stopPropagation();G.selectSlot(${s.slot})">${this.saveMenuMode==='load'?'LOAD':'OVERWRITE'}</div><div class="sl-btn del" onclick="event.stopPropagation();G.deleteSlot(${s.slot})">DELETE</div></div></div>`;}else{h+=`<div class="save-slot empty" onclick="G.selectSlot(${s.slot})"><div class="sl-name">Slot ${s.slot} — Empty</div><div class="sl-info">${this.saveMenuMode==='new'?'Click to start new game here':'No save data'}</div></div>`;}});document.getElementById('SaveSlots').innerHTML=h;}
 closeSaveMenu(){document.getElementById('SaveMenu').classList.remove('active');this.showMainMenu();}
 
-selectSlot(slot){document.getElementById('SaveMenu').classList.remove('active');this.currentSlot=slot;if(this.saveMenuMode==='load'){const data=SaveSystem.load(slot);if(data){this.loadFromSave(data);}else{this.startFresh();}}else{this.startFresh();}}
-deleteSlot(slot){SaveSystem.del(slot);this.showSaveMenu();}
+selectSlot(slot){const data=SaveSystem.load(slot);if(this.saveMenuMode==='new'&&data&&!confirm(`Overwrite save slot ${slot}? This cannot be undone.`))return;document.getElementById('SaveMenu').classList.remove('active');this.currentSlot=slot;if(this.saveMenuMode==='load'){if(data){this.loadFromSave(data);}else{this.startFresh();}}else{this.startFresh();}}
+deleteSlot(slot){if(!confirm(`Delete save slot ${slot}? This cannot be undone.`))return;SaveSystem.del(slot);this.showSaveMenu();}
 
 startFresh(){this.player=this.mkP();this.ups={hp:0,dmg:0,spd:0,bow:0,dodge:0,vamp:0};this.boughtOnce={};this.stats={cells:0,kills:0,gold:0,st:Date.now()};this.slashArcs=[];document.getElementById('PB').style.display='flex';SFX.stopMusic();this.startLevel(0);}
 
-loadFromSave(data){this.player=this.mkP();this.boughtOnce=data.boughtOnce||{};this.ups=data.ups||{hp:0,dmg:0,spd:0,bow:0,dodge:0,vamp:0};this.stats={cells:data.cells||0,kills:data.kills||0,gold:data.gold||0,st:Date.now()};if(data.playerData){const pd=data.playerData;this.player.mhp=pd.mhp||this.player.mhp;this.player.hp=pd.hp||this.player.mhp;this.player.speed=pd.speed||this.player.speed;this.player.gold=pd.gold||0;this.player.cells=0;this.player.weapons=pd.weapons||this.player.weapons;this.player.hasParry=pd.hasParry||false;this.player.hasStrikeBlock=pd.hasStrikeBlock||false;this.player.dodgeChance=pd.dodgeChance||0;this.player.vampLvl=pd.vampLvl||0;this.player.vampChance=pd.vampChance||0;this.player.level=pd.level||1;this.player.exp=pd.exp||0;this.player.etl=pd.etl||50;this.player.pullOnHit=pd.pullOnHit||false;this.player.arrowPierce=pd.arrowPierce||false;this.player.rollDamageTrail=pd.rollDamageTrail||false;this.player.hasGroundPound=pd.hasGroundPound||false;this.player.brutality=pd.brutality||0;this.player.tactics=pd.tactics||0;this.player.survival=pd.survival||0;this.player.flaskMax=pd.flaskMax||2;this.player.flasks=this.player.flaskMax;this.player.hasAirRoll=pd.hasAirRoll||false;this.player.thorns=pd.thorns||0;this.player.adrenaline=pd.adrenaline||false;this.player.magnetR=pd.magnetR||80;this.player.wjMax=pd.wjMax||1;this.player.wjLeft=this.player.wjMax;this.player.hpDisplay=this.player.hp;}this.slashArcs=[];document.getElementById('PB').style.display='flex';SFX.stopMusic();this.startLevel(data.actualLvl||0);}
+loadFromSave(data){this.player=this.mkP();this.boughtOnce=data.boughtOnce??{};this.ups=data.ups??{hp:0,dmg:0,spd:0,bow:0,dodge:0,vamp:0};this.stats={cells:data.cells??0,kills:data.kills??0,gold:data.gold??0,st:Date.now()};if(data.playerData){const pd=data.playerData;this.player.mhp=pd.mhp??this.player.mhp;this.player.hp=pd.hp??this.player.mhp;this.player.speed=pd.speed??this.player.speed;this.player.gold=pd.gold??0;this.player.cells=0;this.player.weapons=pd.weapons??this.player.weapons;this.player.hasParry=pd.hasParry??false;this.player.hasStrikeBlock=pd.hasStrikeBlock??false;this.player.dodgeChance=pd.dodgeChance??0;this.player.vampLvl=pd.vampLvl??0;this.player.vampChance=pd.vampChance??0;this.player.level=pd.level??1;this.player.exp=pd.exp??0;this.player.etl=pd.etl??50;this.player.pullOnHit=pd.pullOnHit??false;this.player.arrowPierce=pd.arrowPierce??false;this.player.rollDamageTrail=pd.rollDamageTrail??false;this.player.hasGroundPound=pd.hasGroundPound??false;this.player.brutality=pd.brutality??0;this.player.tactics=pd.tactics??0;this.player.survival=pd.survival??0;this.player.flaskMax=pd.flaskMax??2;this.player.flasks=this.player.flaskMax;this.player.hasAirRoll=pd.hasAirRoll??false;this.player.thorns=pd.thorns??0;this.player.adrenaline=pd.adrenaline??false;this.player.magnetR=pd.magnetR??80;this.player.wjMax=pd.wjMax??1;this.player.wjLeft=this.player.wjMax;this.player.hpDisplay=this.player.hp;}this.slashArcs=[];document.getElementById('PB').style.display='flex';SFX.stopMusic();this.startLevel(data.actualLvl??0);}
 
 saveGame(){if(!this.currentSlot)return;const p=this.player;const data={actualLvl:this.actualLvl||0,boughtOnce:this.boughtOnce,ups:this.ups,cells:this.stats.cells,kills:this.stats.kills,gold:this.stats.gold,playerLevel:p.level,playerData:{mhp:p.mhp,hp:p.hp,speed:p.speed,gold:p.gold,weapons:p.weapons,hasParry:p.hasParry,hasStrikeBlock:p.hasStrikeBlock,dodgeChance:p.dodgeChance,vampLvl:p.vampLvl,vampChance:p.vampChance,level:p.level,exp:p.exp,etl:p.etl,pullOnHit:p.pullOnHit,arrowPierce:p.arrowPierce,rollDamageTrail:p.rollDamageTrail,hasGroundPound:p.hasGroundPound,brutality:p.brutality,tactics:p.tactics,survival:p.survival,flaskMax:p.flaskMax,hasAirRoll:p.hasAirRoll,thorns:p.thorns,adrenaline:p.adrenaline,magnetR:p.magnetR,wjMax:p.wjMax}};SaveSystem.save(this.currentSlot,data);this.ft.push(new FT(p.x+p.w/2,p.y-30,'SAVED!','#0fa'));}
 
@@ -1920,7 +1935,7 @@ if(this.mossWalls.length<2){let placed=0;for(let tx=4;tx<W2-4&&placed<2;tx++){fo
 if(this.arrowTraps.length<2){let placed=0;for(let ty=4;ty<H2-3&&placed<2;ty++){for(let tx=3;tx<W2-9&&placed<2;){if(!solidAt(tx,ty)){tx++;continue;}let clearR=0;for(let k=1;k<=8;k++){if(openAt(tx+k,ty)&&openAt(tx+k,ty+1))clearR++;else break;}if(clearR>=6&&openAt(tx+1,ty-1)){this.arrowTraps.push(new ArrowTrap(tx,ty,{rotate:0,fireRate:160,projectileSpeed:6.5,damage:12}));placed++;tx+=9;}else tx++;}}}
 }
 this.buildTerrainProps();this.buildForeground();
-const sp=ld.spawn;this.player.x=sp.x*32;this.player.y=sp.y*32;this.player.onIce=false;this.player.onMoss=false;this.player.vx=0;this.player.vy=0;this.player.hp=this.player.mhp;this.player.inv=0;this.player.atk=false;this.player.rl=false;this.player.maxFallSpeed=0;this.portalPos={x:ld.portal.x*32,y:ld.portal.y*32};this.levelName=ld.name;this.levelNameTimer=180;this.state='playing';this.stats.st=Date.now();this.actualLvl=li;SFX.stopMusic();}
+const sp=ld.spawn;this.player.x=sp.x*32;this.player.y=sp.y*32;this.player.onIce=false;this.player.onMoss=false;this.player.vx=0;this.player.vy=0;this.player.hp=U.clamp(this.player.hp??this.player.mhp,0,this.player.mhp);this.player.inv=0;this.player.atk=false;this.player.rl=false;this.player.maxFallSpeed=0;this.portalPos={x:ld.portal.x*32,y:ld.portal.y*32};this.levelName=ld.name;this.levelNameTimer=180;this.state='playing';this.stats.st=Date.now();this.actualLvl=li;SFX.stopMusic();}
 
 // ===================== PROCEDURAL TERRAIN ENRICHMENT =====================
 // The hand-authored levels define *structure*: where you can stand, jump and fall. What they do
@@ -2145,7 +2160,7 @@ drawTerrainProps(c,cam,vw,vh){
 scrollCost(id){const p=this.player;const lv=id==='brutality'?p.brutality:id==='tactics'?p.tactics:p.survival;return 3+lv*2;}
 showCellShop(){this.state='shop';SFX.portal();const el=document.getElementById('CellShop');const p=this.player;
 const util=[
-{id:'heal',name:'Elixir',icon:'✚',color:'#4d6',desc:'Restore all HP',cost:1,fn:()=>{p.hp=p.mhp;}},
+{id:'heal',name:'Elixir',icon:'✚',color:'#4d6',desc:'Restore 40% max HP',cost:3,dis:p.hp>=p.mhp,fn:()=>{p.hp=Math.min(p.mhp,p.hp+Math.ceil(p.mhp*.4));}},
 {id:'dodge',name:'Evasion',icon:'➶',color:'#4af',desc:`+5% Dodge · now ${Math.round(p.dodgeChance*100)}%`,cost:3+this.ups.dodge*2,dis:p.dodgeChance>=.3,fn:()=>{p.dodgeChance=Math.min(.3,p.dodgeChance+.05);this.ups.dodge++;}},
 {id:'vamp',name:'Vampirism',icon:'❦',color:'#a5f',desc:`+4% heal on kill · Lv${p.vampLvl}`,cost:4+this.ups.vamp*3,fn:()=>{p.vampLvl++;p.vampChance=p.vampLvl*.04;this.ups.vamp++;}},
 {id:'spd',name:'Swiftness',icon:'✦',color:'#4fd',desc:`+0.3 Move Speed`,cost:3+this.ups.spd,fn:()=>{p.speed+=.3;this.ups.spd++;}},
@@ -3329,5 +3344,7 @@ let _steps=0;while(this.accumulator>=this.TARGET_MS&&_steps<5){this.update(this.
 start(){this.fr=0;this.ff=0;requestAnimationFrame((t)=>this.loop(t));}
 }
 
-const G=new Game();G.start();
+const G=new Game();
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&G.state==='playing'&&!G.paused)G.togglePause();});
+G.start();
 </script></body></html>
