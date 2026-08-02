@@ -1,0 +1,35 @@
+name: Apply stability patch
+
+on:
+  push:
+    branches:
+      - agent/stability-save-balance-pass
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/stability-save-balance-pass
+
+      - name: Apply guarded patch
+        run: python .github/scripts/apply_stability_patch.py
+
+      - name: Validate inline JavaScript
+        run: python scripts/check-inline-js.py
+
+      - name: Commit generated changes
+        run: |
+          rm .github/scripts/apply_stability_patch.py
+          rm .github/workflows/apply-stability-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: stabilize saves and progression"
+          git push
